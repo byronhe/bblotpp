@@ -1,2 +1,2 @@
-# reimplement etcd-io/bbolt using modern C++.
+# [work-in-progress] reimplement etcd-io/bbolt using modern C++.
 
