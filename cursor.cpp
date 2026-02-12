@@ -14,7 +14,7 @@ namespace bboltpp {
 // If the bucket is empty then a nullptr key and value are returned.
 // The returned key and value are only valid for the life of the transaction.
 KeyValue Cursor::First() {
-  _assert(bucket->tx->db != nullptr, "tx closed");
+  _assert(bucket->tx.lock()->GetDB() != nullptr, "tx closed");
   stack.clear();
   auto [p, n] = bucket->pageNode(bucket->bucket.root);
   stack.emplace_back(p, n, 0);
@@ -37,7 +37,7 @@ KeyValue Cursor::First() {
 // If the bucket is empty then a nullptr key and value are returned.
 // The returned key and value are only valid for the life of the transaction.
 KeyValue Cursor::Last() {
-  _assert(bucket->tx->db != nullptr, "tx closed");
+  _assert(bucket->tx.lock()->GetDB() != nullptr, "tx closed");
   stack.clear();
   auto [p, n] = bucket->pageNode(bucket->bucket.root);
   ElemRef ref(p, n);
@@ -55,7 +55,7 @@ KeyValue Cursor::Last() {
 // If the cursor is at the end of the bucket then a nullptr key and value are returned.
 // The returned key and value are only valid for the life of the transaction.
 KeyValue Cursor::Next() {
-  _assert(bucket->tx->db != nullptr, "tx closed");
+  _assert(bucket->tx.lock()->GetDB() != nullptr, "tx closed");
   auto kvf = next();
   if ((kvf.flags & bucketLeafFlag) != 0) {
     return KeyValue{kvf.key, ""};
@@ -67,7 +67,7 @@ KeyValue Cursor::Next() {
 // If the cursor is at the beginning of the bucket then a nullptr key and value are returned.
 // The returned key and value are only valid for the life of the transaction.
 KeyValue Cursor::Prev() {
-  _assert(bucket->tx->db != nullptr, "tx closed");
+  _assert(bucket->tx.lock()->GetDB() != nullptr, "tx closed");
 
   // Attempt to move back one element until we're successful.
   // Move up the stack as we hit the beginning of each page in our stack.
@@ -117,7 +117,7 @@ KeyValue Cursor::Seek(std::string_view key) {
 // Delete removes the current key/value under the cursor from the bucket.
 // Delete fails if current key/value is a bucket or if the transaction is not writable.
 ErrorCode Cursor::Delete() {
-  if (bucket->tx->db == nullptr) {
+  if (bucket->tx.lock()->GetDB() == nullptr) {
     return ErrorCode::ErrTxClosed;
   } else if (!bucket->Writable()) {
     return ErrorCode::ErrTxNotWritable;
@@ -135,7 +135,7 @@ ErrorCode Cursor::Delete() {
 // seek moves the cursor to a given key and returns it.
 // If the key does not exist then the next key is used.
 KeyValueFlags Cursor::seek(std::string_view seek) {
-  _assert(bucket->tx->db != nullptr, "tx closed");
+  _assert(bucket->tx.lock()->GetDB() != nullptr, "tx closed");
 
   // Start from root page/node and traverse to correct page.
   stack.clear();
@@ -245,10 +245,12 @@ void Cursor::search(std::string_view key, pgid_t pgid) {
     searchNode(key, n);
     return;
   }
-  searchPage(key, p);
+  if (p != nullptr) {
+    searchPage(key, p);
+  }
 }
 
-void Cursor::searchNode(std::string_view key, struct Node *n) {
+void Cursor::searchNode(std::string_view key, std::shared_ptr<Node> n) {
   bool exact = false;
   // index := sort.Search(len(n.inodes), func(i int) bool {
   // 	// TODO(benbjohnson): Optimize this range search. It's a bit hacky right now.
@@ -328,7 +330,7 @@ KeyValueFlags Cursor::keyValue() {
   // Retrieve value from node.
   if (ref.node != nullptr) {
     auto &inode = ref.node->inodes[ref.index];
-    return KeyValueFlags{inode.key, inode.value, inode.flags};
+    return KeyValueFlags{std::string_view(inode.key), std::string_view(inode.value), inode.flags};
   }
 
   // Or retrieve value from page.
@@ -337,7 +339,7 @@ KeyValueFlags Cursor::keyValue() {
 }
 
 // node returns the node that the cursor is currently positioned on.
-Node *Cursor::node() {
+std::shared_ptr<Node> Cursor::node() {
   _assert(stack.size() > 0, "accessing a node with a zero-length cursor stack");
 
   // If the top of the stack is a leaf node then just return it.
@@ -346,13 +348,20 @@ Node *Cursor::node() {
   }
 
   // Start from root and traverse down the hierarchy.
-  auto *n = stack.front().node;
+  auto n = stack.front().node;
   if (n == nullptr) {
-    n = bucket->node(stack.front().page->id, nullptr);
+    if (stack.front().page != nullptr) {
+      n = bucket->node(stack.front().page->id, nullptr);
+    } else {
+      // Inline bucket with no page — use pgid 0
+      n = bucket->node(0, nullptr);
+    }
   }
-  for (auto &ref : stack) {
+
+  // Traverse stack excluding the last element (which is a leaf).
+  for (size_t i = 0; i + 1 < stack.size(); i++) {
     _assert(!n->isLeaf, "expected branch node");
-    n = n->childAt(ref.index);
+    n = n->childAt(stack[i].index);
   }
   _assert(n->isLeaf, "expected leaf node");
   return n;
@@ -363,7 +372,10 @@ bool ElemRef::isLeaf() const {
   if (node != nullptr) {
     return node->isLeaf;
   }
-  return (page->flags & leafPageFlag) != 0;
+  if (page != nullptr) {
+    return (page->flags & leafPageFlag) != 0;
+  }
+  return false;  // Default to non-leaf if both are null
 }
 
 // count returns the number of inodes or page elements.
@@ -371,6 +383,9 @@ int ElemRef::count() const {
   if (node != nullptr) {
     return node->inodes.size();
   }
-  return page->count;
+  if (page != nullptr) {
+    return page->count;
+  }
+  return 0;  // Default to 0 if both are null
 }
 }  // namespace bboltpp

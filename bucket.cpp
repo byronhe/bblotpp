@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include "absl/strings/str_format.h"
@@ -16,8 +17,8 @@ using std::string_view;
 namespace bboltpp {
 
 // newBucket returns a new bucket associated with a transaction.
-Bucket *newBucket(Tx *tx) {
-  auto b = new Bucket();
+std::shared_ptr<Bucket> newBucket(std::shared_ptr<Tx> tx) {
+  auto b = std::make_shared<Bucket>();
   b->tx = tx;
   b->FillPercent = DefaultFillPercent;
 
@@ -32,17 +33,23 @@ Bucket *newBucket(Tx *tx) {
 pgid_t Bucket::Root() const { return bucket.root; }
 
 // Writable returns whether the bucket is writable.
-bool Bucket::Writable() const { return tx->writable; }
+bool Bucket::Writable() const {
+  auto tx_ptr = tx.lock();
+  return tx_ptr ? tx_ptr->writable : false;
+}
 
 // Cursor creates a cursor associated with the bucket.
 // The cursor is only valid as long as the transaction is open.
 // Do not use a cursor after the transaction is closed.
-Cursor *Bucket::NewCursor() {
+std::unique_ptr<Cursor> Bucket::NewCursor() {
   // Update transaction statistics.
-  tx->stats.CursorCount++;
+  auto tx_ptr = tx.lock();
+  if (tx_ptr) {
+    tx_ptr->stats.CursorCount++;
+  }
 
   // Allocate and return a cursor.
-  auto cursor = new struct Cursor();
+  auto cursor = std::make_unique<struct Cursor>();
   cursor->bucket = this;
   return cursor;
 }
@@ -50,15 +57,18 @@ Cursor *Bucket::NewCursor() {
 // Bucket retrieves a nested bucket by name.
 // Returns nullptr if the bucket does not exist.
 // The bucket instance is only valid for the lifetime of the transaction.
-Bucket *Bucket::FindBucketByName(string_view name) {
-  if (buckets.empty()) {
-    return buckets[std::string(name)] = newBucket(nullptr);
+std::shared_ptr<Bucket> Bucket::FindBucketByName(string_view name) {
+  // Check the bucket cache first (only populated for writable transactions).
+  if (!buckets.empty()) {
+    auto it = buckets.find(std::string(name));
+    if (it != buckets.end()) {
+      return it->second;
+    }
   }
 
   // Move cursor to key.
   auto c = NewCursor();
   auto kvf = c->seek(name);
-  // k, v, flags :=
 
   // Return nullptr if the key doesn't exist or it is not a bucket.
   if ((name != kvf.key) || ((kvf.flags & bucketLeafFlag) == 0)) {
@@ -67,7 +77,7 @@ Bucket *Bucket::FindBucketByName(string_view name) {
 
   // Otherwise create a bucket and cache it.
   auto child = openBucket(kvf.value);
-  if (!buckets.empty()) {
+  if (Writable()) {
     buckets[std::string(name)] = child;
   }
 
@@ -76,8 +86,10 @@ Bucket *Bucket::FindBucketByName(string_view name) {
 
 // Helper method that re-interprets a sub-bucket value
 // from a parent into a Bucket
-Bucket *Bucket::openBucket(string_view value) {
-  auto child = newBucket(tx);
+std::shared_ptr<Bucket> Bucket::openBucket(string_view value) {
+  auto tx_ptr = tx.lock();
+  if (!tx_ptr) return nullptr;
+  auto child = newBucket(tx_ptr);
 
   // If this is a writable transaction then we need to copy the bucket entry.
   // Read-only transactions can point directly at the mmap entry.
@@ -85,7 +97,7 @@ Bucket *Bucket::openBucket(string_view value) {
 
   // Save a reference to the inline page if the bucket is inline.
   if (child->bucket.root == 0) {
-    child->page = reinterpret_cast<struct Page *>(const_cast<char *>(&value[bucketHeaderSize]));
+    child->page = reinterpret_cast<Page *>(const_cast<char *>(&value[bucketHeaderSize]));
   }
 
   return child;
@@ -94,10 +106,13 @@ Bucket *Bucket::openBucket(string_view value) {
 // CreateBucket creates a new bucket at the given key and returns the new bucket.
 // Returns an error if the key already exists, if the bucket name is blank, or if the bucket name is too long.
 // The bucket instance is only valid for the lifetime of the transaction.
-std::tuple<Bucket *, ErrorCode> Bucket::CreateBucket(string_view key) {
-  if (tx->db == nullptr) {
+std::tuple<std::shared_ptr<Bucket>, ErrorCode> Bucket::CreateBucket(string_view key) {
+  auto tx_ptr = tx.lock();
+  if (!tx_ptr) return {nullptr, ErrorCode::ErrTxClosed};
+
+  if (tx_ptr->GetDB() == nullptr) {
     return {nullptr, ErrorCode::ErrTxClosed};
-  } else if (!tx->writable) {
+  } else if (!tx_ptr->writable) {
     return {nullptr, ErrorCode::ErrTxNotWritable};
   } else if (key.empty()) {
     return {nullptr, ErrorCode::ErrBucketNameRequired};
@@ -116,13 +131,12 @@ std::tuple<Bucket *, ErrorCode> Bucket::CreateBucket(string_view key) {
   }
 
   // Create empty, inline bucket.
-  auto rootNode = new struct Node;
+  auto rootNode = std::make_shared<struct Node>();
   rootNode->isLeaf = true;
-  Bucket bucket = {
-      .rootNode = rootNode,
-      .FillPercent = DefaultFillPercent,
-  };
-  auto value = bucket.write();
+  auto bucket = std::make_shared<Bucket>();
+  bucket->rootNode = rootNode;
+  bucket->FillPercent = DefaultFillPercent;
+  auto value = bucket->write();
 
   // Insert into node.
   // TODO(memory lifetime issue)
@@ -139,7 +153,7 @@ std::tuple<Bucket *, ErrorCode> Bucket::CreateBucket(string_view key) {
 // CreateBucketIfNotExists creates a new bucket if it doesn't already exist and returns a reference to it.
 // Returns an error if the bucket name is blank, or if the bucket name is too long.
 // The bucket instance is only valid for the lifetime of the transaction.
-std::tuple<Bucket *, ErrorCode> Bucket::CreateBucketIfNotExists(string_view key) {
+std::tuple<std::shared_ptr<Bucket>, ErrorCode> Bucket::CreateBucketIfNotExists(string_view key) {
   auto [child, err] = CreateBucket(key);
   if (err == ErrorCode::ErrBucketExists) {
     return {FindBucketByName(key), ErrorCode::OK};
@@ -152,7 +166,8 @@ std::tuple<Bucket *, ErrorCode> Bucket::CreateBucketIfNotExists(string_view key)
 // DeleteBucket deletes a bucket at the given key.
 // Returns an error if the bucket does not exist, or if the key represents a non-bucket value.
 ErrorCode Bucket::DeleteBucket(string_view key) {
-  if (tx->db == nullptr) {
+  auto tx_ptr = tx.lock();
+  if (!tx_ptr || tx_ptr->GetDB() == nullptr) {
     return ErrorCode::ErrTxClosed;
   } else if (!Writable()) {
     return ErrorCode::ErrTxNotWritable;
@@ -222,7 +237,8 @@ std::optional<string_view> Bucket::Get(string_view key) {
 // Returns an error if the bucket was created from a read-only transaction, if the key is blank, if the key is too
 // large, or if the value is too large.
 ErrorCode Bucket::Put(string_view key, string_view value) {
-  if (tx->db == nullptr) {
+  auto tx_ptr = tx.lock();
+  if (!tx_ptr || tx_ptr->GetDB() == nullptr) {
     return ErrorCode::ErrTxClosed;
   } else if (!Writable()) {
     return ErrorCode::ErrTxNotWritable;
@@ -255,7 +271,8 @@ ErrorCode Bucket::Put(string_view key, string_view value) {
 // If the key does not exist then nothing is done and a nullptr error is returned.
 // Returns an error if the bucket was created from a read-only transaction.
 ErrorCode Bucket::Delete(string_view key) {
-  if (tx->db == nullptr) {
+  auto tx_ptr = tx.lock();
+  if (!tx_ptr || tx_ptr->GetDB() == nullptr) {
     return ErrorCode::ErrTxClosed;
   } else if (!Writable()) {
     return ErrorCode::ErrTxNotWritable;
@@ -286,7 +303,8 @@ uint64_t Bucket::Sequence() { return bucket.sequence; }
 
 // SetSequence updates the sequence number for the bucket.
 ErrorCode Bucket::SetSequence(uint64_t v) {
-  if (tx->db == nullptr) {
+  auto tx_ptr = tx.lock();
+  if (!tx_ptr || tx_ptr->GetDB() == nullptr) {
     return ErrorCode::ErrTxClosed;
   } else if (!Writable()) {
     return ErrorCode::ErrTxNotWritable;
@@ -306,7 +324,8 @@ ErrorCode Bucket::SetSequence(uint64_t v) {
 
 // NextSequence returns an autoincrementing integer for the bucket.
 std::tuple<uint64_t, ErrorCode> Bucket::NextSequence() {
-  if (tx->db == nullptr) {
+  auto tx_ptr = tx.lock();
+  if (!tx_ptr || tx_ptr->GetDB() == nullptr) {
     return {0, ErrorCode::ErrTxClosed};
   } else if (!Writable()) {
     return {0, ErrorCode::ErrTxNotWritable};
@@ -329,7 +348,8 @@ std::tuple<uint64_t, ErrorCode> Bucket::NextSequence() {
 // the error is returned to the caller. The provided function must not modify
 // the bucket; this will result in undefined behavior.
 ErrorCode Bucket::ForEach(std::function<ErrorCode(string_view, string_view)> fn) {
-  if (tx->db == nullptr) {
+  auto tx_ptr = tx.lock();
+  if (!tx_ptr || tx_ptr->GetDB() == nullptr) {
     return ErrorCode::ErrTxClosed;
   }
   auto c = NewCursor();
@@ -344,7 +364,9 @@ ErrorCode Bucket::ForEach(std::function<ErrorCode(string_view, string_view)> fn)
 // Stat returns stats on a bucket.
 BucketStats Bucket::Stats() {
   BucketStats s, subStats;
-  auto pageSize = tx->db->pageSize;
+  auto tx_ptr = tx.lock();
+  if (!tx_ptr) return BucketStats{};
+  auto pageSize = tx_ptr->GetDB()->pageSize;
   s.BucketN += 1;
   if (bucket.root == 0) {
     s.InlineBucketN += 1;
@@ -424,7 +446,7 @@ BucketStats Bucket::Stats() {
 }
 
 // forEachPage iterates over every page in a bucket, including inline pages.
-void Bucket::forEachPage(std::function<void(struct Page *, int)> fn) {
+void Bucket::forEachPage(std::function<void(Page *, int)> fn) {
   // If we have an inline page then just use that.
   if (page != nullptr) {
     fn(page, 0);
@@ -432,12 +454,15 @@ void Bucket::forEachPage(std::function<void(struct Page *, int)> fn) {
   }
 
   // Otherwise traverse the page hierarchy.
-  tx->forEachPage(bucket.root, 0, fn);
+  auto tx_ptr = tx.lock();
+  if (tx_ptr) {
+    tx_ptr->forEachPage(bucket.root, 0, fn);
+  }
 }
 
 // forEachPageNode iterates over every page (or node) in a bucket.
 // This also includes inline pages.
-void Bucket::forEachPageNode(std::function<void(struct Page *, struct Node *, int)> fn) {
+void Bucket::forEachPageNode(std::function<void(Page *, Node *, int)> fn) {
   // If we have an inline page or root node then just use that.
   if (page != nullptr) {
     fn(page, nullptr, 0);
@@ -446,11 +471,11 @@ void Bucket::forEachPageNode(std::function<void(struct Page *, struct Node *, in
   _forEachPageNode(bucket.root, 0, fn);
 }
 
-void Bucket::_forEachPageNode(pgid_t pgid, int depth, std::function<void(struct Page *, struct Node *, int)> fn) {
+void Bucket::_forEachPageNode(pgid_t pgid, int depth, std::function<void(Page *, Node *, int)> fn) {
   auto [p, n] = pageNode(pgid);
 
   // Execute function.
-  fn(p, n, depth);
+  fn(p, n.get(), depth);
 
   // Recursively loop over children.
   if (p != nullptr) {
@@ -518,8 +543,11 @@ ErrorCode Bucket::spill() {
   rootNode = rootNode->root();
 
   // Update the root node for this bucket.
-  if (rootNode->pgid >= tx->meta->pgid) {
-    panic(absl::StrFormat("pgid (%lu) above high water mark (%lu)", rootNode->pgid, tx->meta->pgid));
+  auto tx_ptr = tx.lock();
+  if (!tx_ptr) return ErrorCode::ErrTxClosed;
+
+  if (rootNode->pgid >= tx_ptr->meta->pgid) {
+    panic(absl::StrFormat("pgid (%lu) above high water mark (%lu)", rootNode->pgid, tx_ptr->meta->pgid));
   }
   bucket.root = rootNode->pgid;
 
@@ -553,14 +581,21 @@ bool Bucket::inlineable() {
 }
 
 // Returns the maximum total size of a bucket to make it a candidate for inlining.
-int Bucket::maxInlineBucketSize() { return tx->db->pageSize / 4; }
+int Bucket::maxInlineBucketSize() {
+  auto tx_ptr = tx.lock();
+  if (!tx_ptr) return 0;
+  return tx_ptr->GetDB()->pageSize / 4;
+}
 
 // write allocates and writes a bucket to a byte slice.
 std::string Bucket::write() {
   // Allocate the appropriate size.
   auto n = rootNode;
-  string value;
-  value.assign(reinterpret_cast<const char *>(&bucket), sizeof(bucket));
+  auto sz = bucketHeaderSize + n->size();
+  string value(sz, '\0');
+
+  // Write a bucket header.
+  ::memcpy(&value[0], &bucket, sizeof(bucket));
 
   // Convert byte slice to a fake page and write the root node.
   auto p = reinterpret_cast<struct Page *>(&value[bucketHeaderSize]);
@@ -580,8 +615,8 @@ void Bucket::rebalance() {
 }
 
 // node creates a node from a page and associates it with a given parent.
-Node *Bucket::node(pgid_t pgid, struct Node *parent) {
-  _assert(!nodes.empty(), "nodes map expected");
+std::shared_ptr<Node> Bucket::node(pgid_t pgid, std::shared_ptr<Node> parent) {
+  // Note: nodes map is initialized by default in C++, so no assertion needed
 
   // Retrieve node if it's already been created.
   if (auto it = nodes.find(pgid); it != nodes.end()) {
@@ -589,8 +624,8 @@ Node *Bucket::node(pgid_t pgid, struct Node *parent) {
   }
 
   // Otherwise create a node and cache it.
-  auto n = new struct Node;
-  n->bucket = this;
+  auto n = std::make_shared<struct Node>();
+  n->bucket = shared_from_this();
   n->parent = parent;
   if (parent == nullptr) {
     rootNode = n;
@@ -601,7 +636,9 @@ Node *Bucket::node(pgid_t pgid, struct Node *parent) {
   // Use the inline page if this is an inline bucket.
   auto p = page;
   if (p == nullptr) {
-    p = tx->page(pgid);
+    auto tx_ptr = tx.lock();
+    if (!tx_ptr) return nullptr;
+    p = tx_ptr->page(pgid);
   }
 
   // Read the page into the node and cache it.
@@ -609,7 +646,10 @@ Node *Bucket::node(pgid_t pgid, struct Node *parent) {
   nodes[pgid] = n;
 
   // Update statistics.
-  tx->stats.NodeCount++;
+  auto tx_ptr = tx.lock();
+  if (tx_ptr) {
+    tx_ptr->stats.NodeCount++;
+  }
 
   return n;
 }
@@ -620,9 +660,12 @@ void Bucket::free() {
     return;
   }
 
-  forEachPageNode([this](struct Page *p, struct Node *n, int _) {
+  forEachPageNode([this](Page *p, Node *n, int _) {
     if (p != nullptr) {
-      tx->db->freelist->free(tx->meta->txid, p);
+      auto tx_ptr = tx.lock();
+      if (tx_ptr) {
+        tx_ptr->GetDB()->freelist->free(tx_ptr->meta->txid, p);
+      }
     } else {
       n->free();
     }
@@ -643,7 +686,7 @@ void Bucket::dereference() {
 
 // pageNode returns the in-memory node, if it exists.
 // Otherwise returns the underlying page.
-std::tuple<struct Page *, struct Node *> Bucket::pageNode(pgid_t id) {
+std::tuple<Page *, std::shared_ptr<Node>> Bucket::pageNode(pgid_t id) {
   // Inline buckets have a fake page embedded in their value so treat them
   // differently. We'll return the rootNode (if available) or the fake page.
   if (bucket.root == 0) {
@@ -664,7 +707,9 @@ std::tuple<struct Page *, struct Node *> Bucket::pageNode(pgid_t id) {
   }
 
   // Finally lookup the page from the transaction if no node is materialized.
-  return {tx->page(id), nullptr};
+  auto tx_ptr = tx.lock();
+  if (!tx_ptr) return {nullptr, nullptr};
+  return {tx_ptr->page(id), nullptr};
 }
 
 void BucketStats::Add(const BucketStats &other) {

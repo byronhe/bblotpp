@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <memory>
 #include <string_view>
 #include <tuple>
 #include <vector>
@@ -13,49 +14,44 @@ struct Bucket;
 // It can be used to point to elements in a page or point
 // to an element which hasn't been added to a page yet.
 struct INode {
-  uint32_t flags;
-  pgid_t pgid;
-  std::string_view key;
-  std::string_view value;
+  uint32_t flags = 0;
+  pgid_t pgid = 0;
+  std::string key;
+  std::string value;
 };
 
-using INodeVec = std::vector<INode>;
-
-struct Node;
-using nodes = std::vector<Node *>;
-
 // node represents an in-memory, deserialized page.
-struct Node {
-  Bucket *bucket = nullptr;
+struct Node : public std::enable_shared_from_this<Node> {
+  std::weak_ptr<Bucket> bucket;
   bool isLeaf = false;
   bool unbalanced = false;
   bool spilled = false;
   std::string key;
   pgid_t pgid = 0;
-  Node *parent = nullptr;
-  nodes children;
-  INodeVec inodes;
+  std::weak_ptr<Node> parent;
+  std::vector<std::shared_ptr<Node>> children;
+  std::vector<INode> inodes;
 
-  Node *root();
+  std::shared_ptr<Node> root();
   int minKeys();
   int size();
   bool sizeLessThan(int v);
   int pageElementSize();
-  Node *childAt(int index);
-  int childIndex(Node *child);
+  std::shared_ptr<Node> childAt(int index);
+  int childIndex(std::shared_ptr<Node> child);
   int numChildren();
-  Node *nextSibling();
-  Node *prevSibling();
+  std::shared_ptr<Node> nextSibling();
+  std::shared_ptr<Node> prevSibling();
   void put(std::string_view oldKey, std::string_view newKey, std::string_view value, pgid_t pgid, uint32_t flags);
   void del(std::string_view key);
-  void read(Page *p);
-  void write(Page *p);
-  std::vector<Node *> split(int pageSize);
-  std::tuple<struct Node *, struct Node *> splitTwo(int pageSize);
+  void read(Page* p);
+  void write(Page* p);
+  std::vector<std::shared_ptr<Node>> split(int pageSize);
+  std::tuple<std::shared_ptr<Node>, std::shared_ptr<Node>> splitTwo(int pageSize);
   std::tuple<int, int> splitIndex(int threshold);
   ErrorCode spill();
   void rebalance();
-  void removeChild(Node *target);
+  void removeChild(std::shared_ptr<Node> target);
   void dereference();
   void free();
   void dump();

@@ -191,9 +191,8 @@ void FreeList::rollback(txid_t txid) {
   }
   auto &txp = it->second;
 
-  pgid_vec m;
-  for (size_t i = 0; i < ids.size(); ++i) {
-    auto pgid = ids[i];
+  for (size_t i = 0; i < txp.ids.size(); ++i) {
+    auto pgid = txp.ids[i];
     cache.erase(pgid);
     const auto tx = txp.alloctx[i];
     if (tx == 0) {
@@ -202,14 +201,21 @@ void FreeList::rollback(txid_t txid) {
     if (tx != txid) {
       // Pending free aborted; restore page back to alloc list.
       allocs[pgid] = tx;
+    }
+    // Note: in Go, tx == txid causes a panic. We skip it here
+    // since a writing TXN should never free a page it allocated itself.
+  }
+  // Remove pages from pending list.
+  pending.erase(txid);
+
+  // Remove pgids which are allocated by this txid.
+  for (auto ait = allocs.begin(); ait != allocs.end();) {
+    if (ait->second == txid) {
+      ait = allocs.erase(ait);
     } else {
-      // Freed page was allocated by this txn; OK to throw away.
-      m.emplace_back(pgid);
+      ++ait;
     }
   }
-  // Remove pages from pending list and mark as free if allocated by txid.
-  pending.erase(txid);
-  MergeSpans(m);
 }
 
 // freed returns whether a given page is in the free list.

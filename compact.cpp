@@ -16,8 +16,8 @@ namespace bboltpp {
 // std::string_view v , uint64_t seq ) >;
 
 template <typename walkFunc>
-Error walkBucket(Bucket *b, std::vector<std::string_view> &keypath, std::string_view k, std::string_view v,
-                 uint64_t seq, walkFunc &fn) {
+Error walkBucket(const std::shared_ptr<Bucket> &b, std::vector<std::string_view> &keypath, std::string_view k,
+                 std::string_view v, uint64_t seq, walkFunc &fn) {
   // Execute callback.
   if (auto err = fn(keypath, k, v, seq); not err.OK()) {
     return err;
@@ -43,7 +43,7 @@ Error walkBucket(Bucket *b, std::vector<std::string_view> &keypath, std::string_
 template <typename walkFunc>
 Error walk(DB *db, walkFunc &walkFn) {
   return db->View([&walkFn](Tx *tx) -> Error {
-    return Error{tx->ForEach([&walkFn](std::string_view name, Bucket *b) -> ErrorCode {
+    return Error{tx->ForEach([&walkFn](std::string_view name, const std::shared_ptr<Bucket> &b) -> ErrorCode {
       std::vector<std::string_view> keypath;
       return walkBucket(b, keypath, name, {}, b->Sequence(), walkFn).err_code_;
     })};
@@ -60,7 +60,7 @@ Error Compact(DB *dst, DB *src, int64_t txMaxSize) {
   // commit regularly, or we'll run out of memory for large datasets if using one transaction.
   int64_t size = 0;
 
-  std::unique_ptr<Tx> tx;
+  std::shared_ptr<Tx> tx;
   Error begin_err;
   std::tie(tx, begin_err) = dst->Begin(true);
   if (not begin_err.OK()) {
@@ -101,7 +101,7 @@ Error Compact(DB *dst, DB *src, int64_t txMaxSize) {
     }
 
     // Create buckets on subsequent levels, if necessary.
-    auto *b = tx->FindBucketByName(keys[0]);
+    auto b = tx->FindBucketByName(keys[0]);
     if (nk > 1) {
       for (size_t i = 1; i < keys.size(); ++i) {
         const auto &k = keys[i];

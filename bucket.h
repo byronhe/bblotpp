@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <tuple>
@@ -44,13 +45,13 @@ struct BucketStored {
 constexpr std::size_t bucketHeaderSize = sizeof(BucketStored);
 
 // Bucket represents a collection of key/value pairs inside the database.
-struct Bucket {
-  struct BucketStored bucket;               // *bucket
-  Tx *tx = nullptr;                         // the associated transaction
-  std::map<std::string, Bucket *> buckets;  // subbucket cache
-  Page *page = nullptr;                     // inline page reference
-  Node *rootNode = nullptr;                 // materialized node for the root page.
-  std::map<pgid_t, Node *> nodes;           // node cache
+struct Bucket : public std::enable_shared_from_this<Bucket> {
+  struct BucketStored bucket;                              // *bucket
+  std::weak_ptr<Tx> tx;                                    // the associated transaction
+  std::map<std::string, std::shared_ptr<Bucket>> buckets;  // subbucket cache
+  Page *page = nullptr;                                    // inline page reference
+  std::shared_ptr<Node> rootNode = nullptr;                // materialized node for the root page.
+  std::map<pgid_t, std::shared_ptr<Node>> nodes;           // node cache
 
   // Sets the threshold for filling nodes when they split. By default,
   // the bucket will fill to 50% but it can be useful to increase this
@@ -59,14 +60,14 @@ struct Bucket {
   // This is non-persisted across transactions so it must be set in every Tx.
   double FillPercent = DefaultFillPercent;
 
-  Tx *GetTx() { return tx; }
+  std::shared_ptr<Tx> GetTx() const { return tx.lock(); }
   pgid_t Root() const;
   bool Writable() const;
-  Cursor *NewCursor();
-  Bucket *FindBucketByName(std::string_view name);
-  Bucket *openBucket(std::string_view value);
-  std::tuple<Bucket *, ErrorCode> CreateBucket(std::string_view key);
-  std::tuple<Bucket *, ErrorCode> CreateBucketIfNotExists(std::string_view key);
+  std::unique_ptr<Cursor> NewCursor();
+  std::shared_ptr<Bucket> FindBucketByName(std::string_view name);
+  std::shared_ptr<Bucket> openBucket(std::string_view value);
+  std::tuple<std::shared_ptr<Bucket>, ErrorCode> CreateBucket(std::string_view key);
+  std::tuple<std::shared_ptr<Bucket>, ErrorCode> CreateBucketIfNotExists(std::string_view key);
 
   ErrorCode DeleteBucket(std::string_view key);
   std::optional<std::string_view> Get(std::string_view key);
@@ -77,21 +78,21 @@ struct Bucket {
   std::tuple<uint64_t, ErrorCode> NextSequence();
   ErrorCode ForEach(std::function<ErrorCode(std::string_view, std::string_view)> fn);
   BucketStats Stats();
-  void forEachPage(std::function<void(struct Page *, int)> fn);
-  void forEachPageNode(std::function<void(struct Page *, struct Node *, int)> fn);
+  void forEachPage(std::function<void(Page *, int)> fn);
+  void forEachPageNode(std::function<void(Page *, Node *, int)> fn);
 
-  void _forEachPageNode(pgid_t pgid, int depth, std::function<void(struct Page *, struct Node *, int)> fn);
+  void _forEachPageNode(pgid_t pgid, int depth, std::function<void(Page *, Node *, int)> fn);
   ErrorCode spill();
   bool inlineable();
   int maxInlineBucketSize();
   std::string write();
   void rebalance();
-  Node *node(pgid_t pgid, Node *parent);
+  std::shared_ptr<Node> node(pgid_t pgid, std::shared_ptr<Node> parent);
   void free();
   void dereference();
-  std::tuple<struct Page *, struct Node *> pageNode(pgid_t id);
+  std::tuple<Page *, std::shared_ptr<Node>> pageNode(pgid_t id);
 };
-Bucket *newBucket(Tx *tx);
+std::shared_ptr<Bucket> newBucket(std::shared_ptr<Tx> tx);
 
 // BucketStats records statistics about resources used by a bucket.
 struct BucketStats {

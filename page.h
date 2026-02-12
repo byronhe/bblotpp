@@ -20,6 +20,13 @@ constexpr uint32_t freelistPageFlag = 0x10;
 
 constexpr uint32_t bucketLeafFlag = 0x01;
 
+// Page header size - defined after Page struct
+extern const std::size_t pageHeaderSize;
+
+// Page element sizes - defined after element structs
+extern const std::size_t branchPageElementSize;
+extern const std::size_t leafPageElementSize;
+
 // maxMapSize represents the largest mmap size supported by Bolt.
 constexpr uint64_t maxMapSize = 0xFFFFFFFFFFFF;  // 256TB
 
@@ -38,14 +45,13 @@ struct Page {
   uint32_t overflow = 0;
 
   const char *type() const;
+  std::string typeWithFlags() const;
   struct Meta *meta();
   struct LeafPageElement *leafPageElement(uint16_t index);
   std::tuple<struct LeafPageElement *, uint16_t> leafPageElements();
   struct BranchPageElement *branchPageElement(uint16_t index);
   std::tuple<struct BranchPageElement *, uint16_t> branchPageElements();
 };
-
-constexpr std::size_t pageHeaderSize = sizeof(Page);
 
 // meta returns a pointer to the metadata section of the page.
 inline struct Meta *Page::meta() {
@@ -65,11 +71,10 @@ struct LeafPageElement {
   // value returns a byte slice of the node value.
   std::string_view value() { return {reinterpret_cast<const char *>(this) + pos + ksize, vsize}; }
 };
-constexpr std::size_t leafPageElementSize = sizeof(LeafPageElement);
 
 // leafPageElement retrieves the leaf node by index
 inline struct LeafPageElement *Page::leafPageElement(uint16_t index) {
-  return reinterpret_cast<struct LeafPageElement *>(this + sizeof(*this) + leafPageElementSize * index);
+  return reinterpret_cast<struct LeafPageElement *>(reinterpret_cast<char *>(this) + sizeof(*this) + leafPageElementSize * index);
 }
 
 // leafPageElements retrieves a list of leaf nodes.
@@ -77,7 +82,7 @@ inline std::tuple<struct LeafPageElement *, uint16_t> Page::leafPageElements() {
   if (count == 0) {
     return {nullptr, 0};
   }
-  auto *elems = reinterpret_cast<struct LeafPageElement *>(this + sizeof(*this));
+  auto *elems = reinterpret_cast<struct LeafPageElement *>(reinterpret_cast<char *>(this) + sizeof(*this));
   return {elems, this->count};
 }
 
@@ -91,11 +96,9 @@ struct BranchPageElement {
   std::string_view key() const { return std::string_view((const char *)this + pos, ksize); }
 };
 
-constexpr std::size_t branchPageElementSize = sizeof(BranchPageElement);
-
 // branchPageElement retrieves the branch node by index
 inline BranchPageElement *Page::branchPageElement(uint16_t index) {
-  return reinterpret_cast<struct BranchPageElement *>(this + sizeof(*this) + branchPageElementSize * index);
+  return reinterpret_cast<struct BranchPageElement *>(reinterpret_cast<char *>(this) + sizeof(*this) + branchPageElementSize * index);
 }
 
 // branchPageElements retrieves a list of branch nodes.
@@ -103,7 +106,7 @@ inline std::tuple<struct BranchPageElement *, uint16_t> Page::branchPageElements
   if (count == 0) {
     return {nullptr, 0};
   }
-  auto *elems = reinterpret_cast<struct BranchPageElement *>(this + sizeof(*this));
+  auto *elems = reinterpret_cast<struct BranchPageElement *>(reinterpret_cast<char *>(this) + sizeof(*this));
   return {elems, count};
 }
 

@@ -1,5 +1,6 @@
 #include "db.h"
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
@@ -14,7 +15,6 @@
 #include <string_view>
 #include <unordered_map>
 #include "absl/cleanup/cleanup.h"
-#include "absl/hash/hash.h"
 #include "absl/strings/str_format.h"
 #include "errors.h"
 #include "freelist.h"
@@ -52,8 +52,8 @@ const Options &DefaultOptions();
 // If the file does not exist then it will be created automatically.
 // Passing in nullptr options will cause Bolt to open the database with the default options.
 
-std::tuple<std::unique_ptr<DB>, Error> DB::Open(std::string_view path, uint32_t mode, const Options *options_ptr) {
-  std::unique_ptr<DB> db_ptr = std::make_unique<DB>();
+std::tuple<std::shared_ptr<DB>, Error> DB::Open(std::string_view path, uint32_t mode, const Options *options_ptr) {
+  std::shared_ptr<DB> db_ptr = std::make_shared<DB>();
   DB &db = *db_ptr;
   db.opened = true;
 
@@ -108,7 +108,7 @@ std::tuple<std::unique_ptr<DB>, Error> DB::Open(std::string_view path, uint32_t 
   }
 
   // Default values for test hooks
-  db.ops.writeAt = [&db](std::string_view buff, int64_t offset) { return db.file->WriteAt(buff, offset); };
+  db.ops.writeAt = [db_ptr](std::string_view buff, int64_t offset) { return db_ptr->file->WriteAt(buff, offset); };
 
   if (db.pageSize = options.PageSize; db.pageSize == 0) {
     // Set the default page size to the OS page size.
@@ -138,7 +138,7 @@ std::tuple<std::unique_ptr<DB>, Error> DB::Open(std::string_view path, uint32_t 
     // are out of luck and cannot access the database.
     //
     // TODO: scan for next page
-    if (auto [bw, err] = db.file->ReadAt(0, &buf); err.OK() && (bw == buf.size())) {
+    if (auto [bw, err] = db.file->ReadAt(0, &buf); err.OK() && (bw == static_cast<int>(buf.size()))) {
       if (auto m = db.pageInBuffer(buf, 0)->meta(); m->validate() == ErrorCode::OK) {
         db.pageSize = int(m->pageSize);
       }
@@ -235,8 +235,8 @@ Error DB::mmap(int minsz) {
   }
 
   // Dereference all mmap references before unmapping.
-  if (this->rwtx != nullptr) {
-    this->rwtx->root->dereference();
+  if (auto t = this->rwtx.lock(); t != nullptr) {
+    t->root->dereference();
   }
 
   // Unmap existing data before continuing.
@@ -245,9 +245,22 @@ Error DB::mmap(int minsz) {
   }
 
   // Memory-map the data file as a byte slice.
-  if (auto err = mmap(size); not err.OK()) {
-    return err;
+  const auto ret = ::mmap(nullptr, size, PROT_READ, MAP_SHARED | MmapFlags, file->Fd(), 0);
+  if (ret == MAP_FAILED) {
+    return Error{errno};
   }
+
+  // Advise the kernel that the mmap is accessed randomly.
+  int const madvise_err = ::madvise(ret, size, MADV_RANDOM);
+  if (madvise_err != 0 && errno != ENOSYS) {
+    // Ignore not implemented error in kernel because it still works.
+    return Error{absl::StrFormat("madvise: %d errno %d ", madvise_err, errno)};
+  }
+
+  // Save the original byte slice and convert to a byte array pointer.
+  dataref = std::string_view(static_cast<const char *>(ret), size);
+  data = std::string_view(static_cast<const char *>(ret), size);
+  datasz = size;
 
   if (this->Mlock) {
     // Don't allow swapping of data file
@@ -265,6 +278,7 @@ Error DB::mmap(int minsz) {
   // properly -- but we can recover using meta1. And vice-versa.
   auto err0 = this->meta0->validate();
   auto err1 = this->meta1->validate();
+
   if (err0 != ErrorCode::OK && err1 != ErrorCode::OK) {
     return Error{err0};
   }
@@ -274,10 +288,17 @@ Error DB::mmap(int minsz) {
 
 // munmap unmaps the data file from memory.
 Error DB::munmap() {
-  if (auto err = file->Munmap(); not err.OK()) {
-    return Error{absl::StrFormat("unmap error: %v ", err)};
+  // Ignore the unmap if we have no mapped data.
+  if (dataref.empty()) {
+    return Error{};
   }
-  return Error{};
+
+  // Unmap using the original byte slice.
+  auto ret = ::munmap(const_cast<void *>(static_cast<const void *>(dataref.data())), dataref.size());
+  dataref = std::string_view{};
+  data = std::string_view{};
+  datasz = 0;
+  return Error{ret};
 }
 
 // mmapSize determines the appropriate size for the mmap given the current size
@@ -318,17 +339,29 @@ std::tuple<int, Error> DB::mmapSize(int size) {
 }
 
 Error DB::munlock(int fileSize) {
-  if (auto err = file->MUnlock(fileSize); not err.OK()) {
-    return Error{absl::StrFormat("munlock error: %v ", err)};
+  if (data.empty()) {
+    return Error{};
   }
-  return Error{};
+
+  size_t size_to_unlock = fileSize;
+  if (size_to_unlock > data.size()) {
+    size_to_unlock = data.size();
+  }
+  auto ret = ::munlock(data.data(), size_to_unlock);
+  return Error{ret};
 }
 
 Error DB::mlock(int fileSize) {
-  if (auto err = file->Mlock(fileSize); not err.OK()) {
-    return Error{absl::StrFormat("mlock error: %v", err)};
+  if (data.empty()) {
+    return Error{};
   }
-  return Error{};
+
+  size_t size_to_lock = fileSize;
+  if (size_to_lock > data.size()) {
+    size_to_lock = data.size();
+  }
+  auto ret = ::mlock(data.data(), size_to_lock);
+  return Error{ret};
 }
 
 Error DB::mrelock(int fileSizeFrom, int fileSizeTo) {
@@ -452,14 +485,14 @@ Error DB::close() {
 //
 // IMPORTANT: You must close read-only transactions after you are finished or
 // else the database will not reclaim old pages.
-std::tuple<std::unique_ptr<Tx>, Error> DB::Begin(bool writable) {
+std::tuple<std::shared_ptr<Tx>, Error> DB::Begin(bool writable) {
   if (writable) {
     return this->beginRWTx();
   }
   return this->beginTx();
 }
 
-std::tuple<std::unique_ptr<Tx>, Error> DB::beginTx() {
+std::tuple<std::shared_ptr<Tx>, Error> DB::beginTx() {
   // Lock the meta pages while we initialize the transaction. We obtain
   // the meta lock before the mmap lock because that's the order that the
   // write transaction will obtain them.
@@ -477,11 +510,11 @@ std::tuple<std::unique_ptr<Tx>, Error> DB::beginTx() {
   }
 
   // Create a transaction associated with the database.
-  auto t = std::make_unique<Tx>();
-  t->init(this);
+  auto t = std::make_shared<Tx>();
+  t->init(shared_from_this());
 
   // Keep track of transaction until it closes.
-  this->txs.emplace_back(t.get());
+  this->txs.emplace_back(t);
   const size_t n = this->txs.size();
 
   // Unlock the meta pages.
@@ -495,7 +528,7 @@ std::tuple<std::unique_ptr<Tx>, Error> DB::beginTx() {
   return {std::move(t), Error{}};
 }
 
-std::tuple<std::unique_ptr<Tx>, Error> DB::beginRWTx() {
+std::tuple<std::shared_ptr<Tx>, Error> DB::beginRWTx() {
   // If the database was opened with Options.ReadOnly, return an error.
   if (this->readOnly) {
     return {nullptr, Error{ErrorCode::ErrDatabaseReadOnly}};
@@ -515,17 +548,22 @@ std::tuple<std::unique_ptr<Tx>, Error> DB::beginRWTx() {
   }
 
   // Create a transaction associated with the database.
-  auto t = std::make_unique<Tx>();
+  auto t = std::make_shared<Tx>();
   t->writable = true;
-  t->init(this);
-  this->rwtx = t.get();
+  t->init(shared_from_this());
+  this->rwtx = t;
   this->freePages();
   return {std::move(t), Error{}};
 }
 
 // using txsById = std::vector<Tx *>;  //[]*Tx;
 
-inline bool TxIDLess(Tx *a, Tx *b) { return a->meta->txid < b->meta->txid; }
+inline bool TxIDLess(const std::weak_ptr<Tx> &a, const std::weak_ptr<Tx> &b) {
+  auto a_ptr = a.lock();
+  auto b_ptr = b.lock();
+  if (!a_ptr || !b_ptr) return false;
+  return a_ptr->meta->txid < b_ptr->meta->txid;
+}
 
 // func (t txsById) Len() int           { return len(t) }
 // func (t txsById) Swap(i, j int)      { t[i], t[j] = t[j], t[i] }
@@ -538,13 +576,20 @@ void DB::freePages() {
   // sort.Sort(txsById(this->txs));
   txid_t minid = 0xFFFFFFFFFFFFFFFF;
   if (this->txs.size() > 0) {
-    minid = this->txs[0]->meta->txid;
+    auto t = txs[0].lock();
+    if (t != nullptr) {
+      minid = t->meta->txid;
+    }
   }
   if (minid > 0) {
     this->freelist->release(minid - 1);
   }
   // Release unused txid extents.
-  for (auto t : this->txs) {
+  for (auto &tx : this->txs) {
+    auto t = tx.lock();
+    if (t == nullptr) {
+      continue;
+    }
     this->freelist->releaseRange(minid, t->meta->txid - 1);
     minid = t->meta->txid + 1;
   }
@@ -562,13 +607,14 @@ void DB::removeTx(Tx *tx) {
   {
     std::lock_guard meta_g(this->metalock);
 
+    // TODO(byronhe): std::remove_if();
     // Remove the transaction.
-    for (int i = 0; i < this->txs.size(); ++i) {
-      auto t = txs[i];
-      if (t == tx) {
+    for (size_t i = 0; i < this->txs.size(); ++i) {
+      auto t = txs[i].lock();
+      if (t.get() == tx) {
         auto last = this->txs.size() - 1;
         this->txs[i] = this->txs[last];
-        this->txs[last] = nullptr;
+        this->txs[last].reset();
         this->txs.pop_back();
         break;
       }
@@ -592,7 +638,7 @@ void DB::removeTx(Tx *tx) {
 //
 // Attempting to manually commit or rollback within the function will cause a panic.
 Error DB::Update(std::function<Error(Tx *)> fn) {
-  std::unique_ptr<Tx> t;
+  std::shared_ptr<Tx> t;
   Error err;
   tie(t, err) = this->Begin(true);
   if (not err.OK()) {
@@ -625,7 +671,7 @@ Error DB::Update(std::function<Error(Tx *)> fn) {
 //
 // Attempting to manually rollback within the function will cause a panic.
 Error DB::View(std::function<Error(Tx *)> fn) {
-  std::unique_ptr<Tx> t;
+  std::shared_ptr<Tx> t;
   Error err;
   tie(t, err) = this->Begin(false);
   if (not err.OK()) {
@@ -778,7 +824,7 @@ struct Panicked {
   }
 };
 
-Error safelyCall(std::function<Error(Tx *)> fn, Tx *tx) {
+Error DB::safelyCall(std::function<Error(Tx *)> fn, Tx *tx) {
   Error err;
   absl::Cleanup c{[&]() {
     // TODO
@@ -848,11 +894,19 @@ Meta *DB::GetMeta() {
 
 // allocate returns a contiguous block of memory starting at a given page.
 std::tuple<Page *, Error> DB::allocate(txid_t txid, int count) {
-  // Allocate a temporary buffer for the page.
-  auto *buf = new char[pageSize];  //, '\0');
+  auto tx = this->rwtx.lock();
+  if (!tx) {
+    return {nullptr, Error{"no write transaction"}};
+  }
 
-  Page *p = reinterpret_cast<Page *>(&buf[0]);
+  // Allocate a temporary buffer for the page.
+  auto buf = std::make_unique<char[]>(count * pageSize);
+  ::memset(buf.get(), 0, count * pageSize);
+  auto *p = reinterpret_cast<Page *>(buf.get());
   p->overflow = uint32_t(count - 1);
+
+  // Store the buffer in the transaction so it lives long enough.
+  tx->page_buffers.emplace_back(std::move(buf));
 
   // Use pages from the freelist if they are available.
   if (p->id = this->freelist->Allocate(txid, count); p->id != 0) {
@@ -860,7 +914,7 @@ std::tuple<Page *, Error> DB::allocate(txid_t txid, int count) {
   }
 
   // Resize mmap() if we're at the end.
-  p->id = this->rwtx->meta->pgid;
+  p->id = tx->meta->pgid;
   auto minsz = int((p->id + pgid_t(count)) + 1) * this->pageSize;
   if (minsz >= this->datasz) {
     if (auto err = this->mmap(minsz); not err.OK()) {
@@ -869,7 +923,7 @@ std::tuple<Page *, Error> DB::allocate(txid_t txid, int count) {
   }
 
   // Move the page id high water mark.
-  this->rwtx->meta->pgid += pgid_t(count);
+  tx->meta->pgid += pgid_t(count);
 
   return {p, Error{}};
 }
@@ -915,7 +969,7 @@ Error DB::grow(int sz) {
 bool DB::IsReadOnly() { return this->readOnly; }
 
 pgid_vec DB::freepages() {
-  std::unique_ptr<Tx> tx;
+  std::shared_ptr<Tx> tx;
   Error err;
   std::tie(tx, err) = this->beginTx();
   absl::Cleanup rollback_clean{[&tx]() {
@@ -931,7 +985,7 @@ pgid_vec DB::freepages() {
   std::map<pgid_t, Page *> reachable;
   std::map<pgid_t, bool> nofreed;
   std::vector<Error> ech;
-  tx->checkBucket(tx->root, reachable, nofreed, ech);
+  tx->checkBucket(tx->root.get(), reachable, nofreed, ech);
   // go func() {
   for (const auto &e : ech) {
     panic(absl::StrFormat("freepages: failed to get all reachable pages (%v)", e));
@@ -1008,7 +1062,20 @@ void Meta::write(Page *p) {
   this->copy(p->meta());
 }
 
-// generates the checksum for the meta.
-uint64_t Meta::sum64() { return absl::Hash<Meta>()(*this); }
+// generates the checksum for the meta using FNV-1a (compatible with Go's hash/fnv.New64a).
+uint64_t Meta::sum64() {
+  // Hash all bytes up to (but not including) the checksum field,
+  // matching Go's: h.Write((*[unsafe.Offsetof(Meta{}.checksum)]byte)(unsafe.Pointer(m))[:])
+  const auto *data = reinterpret_cast<const uint8_t *>(this);
+  const size_t len = offsetof(Meta, checksum);
+
+  // FNV-1a 64-bit
+  uint64_t hash = 14695981039346656037ULL;  // FNV offset basis
+  for (size_t i = 0; i < len; i++) {
+    hash ^= static_cast<uint64_t>(data[i]);
+    hash *= 1099511628211ULL;  // FNV prime
+  }
+  return hash;
+}
 
 }  // namespace bboltpp

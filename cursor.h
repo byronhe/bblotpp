@@ -27,12 +27,12 @@ struct KeyValueFlags {
 
 // elemRef represents a reference to an element on a given page/node.
 struct ElemRef {
-  Page *page = nullptr;
-  Node *node = nullptr;
+  Page* page = nullptr;
+  std::shared_ptr<Node> node = nullptr;
   int index = 0;
 
   explicit ElemRef() = default;
-  explicit ElemRef(struct Page *p, struct Node *n, int i = 0) : page(p), node(n), index(i) {}
+  explicit ElemRef(Page* p, std::shared_ptr<Node> n, int i = 0) : page(p), node(n), index(i) {}
 
   // isLeaf returns whether the ref is pointing at a leaf page/node.
   bool isLeaf() const;
@@ -53,11 +53,11 @@ struct ElemRef {
 // and return unexpected keys and/or values. You must reposition your cursor
 // after mutating data.
 struct Cursor {
-  Bucket *bucket = nullptr;
+  Bucket* bucket = nullptr;
   std::vector<ElemRef> stack;
 
   // Bucket returns the bucket that this cursor was created from.
-  Bucket *GetBucket() const { return bucket; }
+  Bucket* GetBucket() const { return bucket; }
   KeyValue First();
   KeyValue Last();
   KeyValue Next();
@@ -66,15 +66,15 @@ struct Cursor {
   ErrorCode Delete();
 
   KeyValueFlags seek(std::string_view key);
-  Node *node();
+  std::shared_ptr<Node> node();
 
  private:
   void first();
   void last();
   KeyValueFlags next();
   void search(std::string_view key, pgid_t pgid);
-  void searchNode(std::string_view key, struct Node *n);
-  void searchPage(std::string_view key, Page *p);
+  void searchNode(std::string_view key, std::shared_ptr<Node> n);
+  void searchPage(std::string_view key, Page* p);
   void nsearch(std::string_view key);
   KeyValueFlags keyValue();
 };

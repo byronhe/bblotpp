@@ -16,19 +16,10 @@ T* unsafeIndex(T* base, uint64_t offset, uint64_t elemsz, int n) {
 
 template <typename T>
 std::string_view unsafeByteSlice(T* base, uint64_t offset, int i, int j) {
-  // See: https://github.com/golang/go/wiki/cgo#turning-c-arrays-into-go-slices
-  //
-  // This memory is not allocated from C, but it is unmanaged by Go's
-  // garbage collector and should behave similarly, and the compiler
-  // should produce similar code.  Note that this conversion allows a
-  // subslice to begin after the base address, with an optional offset,
-  // while the URL above does not cover this case and only slices from
-  // index 0.  However, the wiki never says that the address must be to
-  // the beginning of a C allocation (or even that malloc was used at
-  // all), so this is believed to be correct.
-  T* arr = unsafeAdd<T>(base, offset);
-  return {reinterpret_cast<char*>(&arr[i]),
-          static_cast<size_t>(reinterpret_cast<char*>(&arr[j]) - reinterpret_cast<char*>(&arr[i]))};
+  // Returns a string_view over the byte range [offset+i, offset+j) from base.
+  // All indexing is in bytes (matching Go's unsafe.Pointer semantics).
+  char* start = reinterpret_cast<char*>(base) + offset + i;
+  return {start, static_cast<size_t>(j - i)};
 }
 
 // unsafeSlice modifies the data, len, and cap of a slice variable pointed to by
@@ -42,4 +33,23 @@ std::string_view unsafeByteSlice(T* base, uint64_t offset, int i, int j) {
 // 	s.Cap = len
 // 	s.Len = len
 // }
+
+// LoadBucket loads a bucket from a byte buffer
+template <typename T>
+T* LoadBucket(void* buf) {
+  return reinterpret_cast<T*>(buf);
+}
+
+// LoadPage loads a page from a byte buffer
+template <typename T>
+T* LoadPage(void* buf) {
+  return reinterpret_cast<T*>(buf);
+}
+
+// LoadPageMeta loads a page meta from a byte buffer at the specified offset
+template <typename T>
+T* LoadPageMeta(void* buf, size_t offset) {
+  return reinterpret_cast<T*>(static_cast<char*>(buf) + offset);
+}
+
 }  // namespace bboltpp

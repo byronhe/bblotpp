@@ -21,6 +21,15 @@ File::~File() {
   }
 }
 
+Error File::Close() {
+  if (fd_ >= 0) {
+    int ret = ::close(fd_);
+    fd_ = -1;
+    return Error{ret};
+  }
+  return Error{};
+}
+
 std::tuple<std::unique_ptr<File>, Error> File::OSOpenFile(std::string_view path, int flags, int mode) {
   auto f = std::make_unique<File>();
   int const fd = ::open(path.data(), flags, mode);
@@ -32,7 +41,14 @@ std::tuple<std::unique_ptr<File>, Error> File::OSOpenFile(std::string_view path,
 }
 
 // fdatasync flushes written data to a file descriptor.
-Error File::FDataSync() { return Error{::fdatasync(fd_)}; }
+Error File::FDataSync() {
+#ifdef __APPLE__
+  // macOS doesn't have fdatasync, use fsync instead
+  return Error{::fsync(fd_)};
+#else
+  return Error{::fdatasync(fd_)};
+#endif
+}
 
 Error File::Sync() { return Error{::fsync(fd_)}; }
 
@@ -148,10 +164,10 @@ ssize_t File::Write(std::string_view buff) { return ::write(fd_, buff.data(), bu
 std::tuple<int, Error> File::WriteAt(std::string_view b, int64_t offset) {
   const ssize_t ret = ::pwrite(fd_, b.data(), b.size(), offset);
   if (-1 == ret) {
-    return {ret, Error(ret)};
+    return {(int)ret, Error((int)ret)};
   }
 
-  return {ret, Error()};
+  return {(int)ret, Error()};
 }
 
 std::tuple<int, Error> File::ReadAt(int64_t offset, std::string *to_buf) {

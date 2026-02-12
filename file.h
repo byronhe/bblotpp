@@ -14,10 +14,8 @@ namespace bboltpp {
 // The time elapsed between consecutive file locking attempts.
 constexpr std::chrono::milliseconds flockRetryTimeout{50};  //* time.Millisecond;
 
-class File;
-using OpenFileFunc = std::function<std::tuple<std::unique_ptr<File>, Error>(std::string_view, int, int)>;
-
 class File {
+ private:
   int fd_ = -1;
   std::string name_;
   void *mmap_addr_ = nullptr;
@@ -36,8 +34,6 @@ class File {
   ~File();
 
   static std::tuple<std::unique_ptr<File>, Error> OSOpenFile(std::string_view path, int flags, int mode);
-
-  // int Open(std::string_view path, int flags, int mode);
 
   Error Close();
 
@@ -75,6 +71,10 @@ class File {
   };
 
   std::tuple<FileInfo, Error> Stat();
+
+  int Fd() const { return fd_; }
 };
+
+using OpenFileFunc = std::function<std::tuple<std::unique_ptr<File>, Error>(std::string_view, int, int)>;
 
 }  // namespace bboltpp

@@ -1,6 +1,7 @@
 #include "node.h"
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <string_view>
 #include "absl/strings/str_format.h"
 #include "bucket.h"
@@ -12,11 +13,12 @@
 namespace bboltpp {
 
 // root returns the top-level node this node is attached to.
-Node *Node::root() {
-  if (parent == nullptr) {
-    return this;
+std::shared_ptr<Node> Node::root() {
+  auto p = parent.lock();
+  if (p == nullptr) {
+    return shared_from_this();
   }
-  return parent->root();
+  return p->root();
 }
 
 // minKeys returns the minimum number of inodes this node should have.
@@ -45,7 +47,7 @@ bool Node::sizeLessThan(int v) {
   auto elsz = pageElementSize();
   for (auto &item : inodes) {
     sz += elsz + item.key.size() + item.value.size();
-    if (sz > -v) {
+    if (sz >= static_cast<size_t>(v)) {
       return false;
     }
   }
@@ -61,15 +63,17 @@ int Node::pageElementSize() {
 }
 
 // childAt returns the child node at a given index.
-Node *Node::childAt(int index) {
+std::shared_ptr<Node> Node::childAt(int index) {
   if (isLeaf) {
     panic(absl::StrFormat("invalid childAt(%d) on a leaf node", index));
   }
-  return bucket->node(inodes[index].pgid, this);
+  auto bucket_ptr = bucket.lock();
+  if (!bucket_ptr) return nullptr;
+  return bucket_ptr->node(inodes[index].pgid, shared_from_this());
 }
 
 // childIndex returns the index of a given child node.
-int Node::childIndex(Node *child) {
+int Node::childIndex(std::shared_ptr<Node> child) {
   auto it = std::lower_bound(inodes.begin(), inodes.end(), child->key,
                              [&](const auto &in, const auto &key) { return in.key < key; });
   return it - inodes.begin();
@@ -79,54 +83,65 @@ int Node::childIndex(Node *child) {
 int Node::numChildren() { return inodes.size(); }
 
 // nextSibling returns the next node with the same parent.
-Node *Node::nextSibling() {
-  if (parent == nullptr) {
+std::shared_ptr<Node> Node::nextSibling() {
+  if (parent.lock() == nullptr) {
     return nullptr;
   }
-  auto index = parent->childIndex(this);
-  if (index >= parent->numChildren() - 1) {
+  auto parent_ptr = parent.lock();
+  if (!parent_ptr) return nullptr;
+
+  auto index = parent_ptr->childIndex(shared_from_this());
+  if (index >= parent_ptr->numChildren() - 1) {
     return nullptr;
   }
-  return parent->childAt(index + 1);
+  return parent_ptr->childAt(index + 1);
 }
 
 // prevSibling returns the previous node with the same parent.
-Node *Node::prevSibling() {
-  if (parent == nullptr) {
+std::shared_ptr<Node> Node::prevSibling() {
+  if (parent.lock() == nullptr) {
     return nullptr;
   }
-  auto index = parent->childIndex(this);
+  auto parent_ptr = parent.lock();
+  if (!parent_ptr) return nullptr;
+
+  auto index = parent_ptr->childIndex(shared_from_this());
   if (index == 0) {
     return nullptr;
   }
-  return parent->childAt(index - 1);
+  return parent_ptr->childAt(index - 1);
 }
 
 // put inserts a key/value.
 void Node::put(std::string_view oldKey, std::string_view newKey, std::string_view value, pgid_t pgid, uint32_t flags) {
-  if (pgid >= bucket->tx->meta->pgid) {
-    panic(absl::StrFormat("pgid (%lu) above high water mark (%lu)", pgid, bucket->tx->meta->pgid));
+  auto bucket_ptr = bucket.lock();
+  if (!bucket_ptr) return;
+  auto tx_ptr = bucket_ptr->tx.lock();
+  if (!tx_ptr) return;
+
+  if (pgid >= tx_ptr->meta->pgid) {
+    panic(absl::StrFormat("pgid (%lu) above high water mark (%lu)", pgid, tx_ptr->meta->pgid));
   } else if (oldKey.size() <= 0) {
     panic("put: zero-length old key");
   } else if (newKey.size() <= 0) {
     panic("put: zero-length new key");
   }
 
-  // Find insertion index.
-  auto it = std::lower_bound(inodes.begin(), inodes.end(), oldKey,
-                             [&](const auto &in, const auto &key) { return in.key < key; });
-  auto index = it - inodes.begin();
+  // Find insertion index using binary search
+  auto index = std::lower_bound(inodes.begin(), inodes.end(), oldKey,
+                                [&](const auto &in, const auto &key) { return in.key < key; }) -
+               inodes.begin();
 
   // Add capacity and shift nodes if we don't have an exact match and need to insert.
-  bool const exact = (it != inodes.end()) && (it->key == oldKey);
+  bool const exact = (static_cast<size_t>(index) < inodes.size()) && (inodes[index].key == oldKey);
   if (!exact) {
-    inodes.insert(it, {});
+    inodes.insert(inodes.begin() + index, INode{});
   }
 
   auto &inode = inodes[index];
   inode.flags = flags;
-  inode.key = newKey;
-  inode.value = value;
+  inode.key = std::string(newKey);
+  inode.value = std::string(value);
   inode.pgid = pgid;
   _assert(inode.key.size() > 0, "put: zero-length inode key");
 }
@@ -161,12 +176,12 @@ void Node::read(Page *p) {
     if (isLeaf) {
       auto elem = p->leafPageElement(i);
       inode.flags = elem->flags;
-      inode.key = elem->key();
-      inode.value = elem->value();
+      inode.key = std::string(elem->key());
+      inode.value = std::string(elem->value());
     } else {
       auto elem = p->branchPageElement(i);
       inode.pgid = elem->pgid;
-      inode.key = elem->key();
+      inode.key = std::string(elem->key());
     }
     _assert(inode.key.size() > 0, "read: zero-length inode key");
   }
@@ -228,9 +243,8 @@ void Node::write(Page *p) {
     }
 
     // Write data for the element to the end of the page.
-    // TODO() use std::string support realloc + memcpy
-    // l := copy(b, item.key)
-    // copy(b[l:], item.value)
+    ::memcpy(const_cast<char *>(b.data()), item.key.data(), item.key.size());
+    ::memcpy(const_cast<char *>(b.data()) + item.key.size(), item.value.data(), item.value.size());
   }
 
   // DEBUG ONLY: n.dump()
@@ -238,8 +252,8 @@ void Node::write(Page *p) {
 
 // split breaks up a node into multiple smaller nodes, if appropriate.
 // This should only be called from the spill() function.
-std::vector<Node *> Node::split(int pageSize) {
-  std::vector<Node *> nodes;
+std::vector<std::shared_ptr<Node>> Node::split(int pageSize) {
+  std::vector<std::shared_ptr<Node>> nodes;
 
   auto node = this;
   for (;;) {
@@ -253,7 +267,7 @@ std::vector<Node *> Node::split(int pageSize) {
     }
 
     // Set node to b so it gets split on the next iteration.
-    node = b;
+    node = b.get();
   }
 
   return nodes;
@@ -261,15 +275,17 @@ std::vector<Node *> Node::split(int pageSize) {
 
 // splitTwo breaks up a node into two smaller nodes, if appropriate.
 // This should only be called from the split() function.
-std::tuple<struct Node *, struct Node *> Node::splitTwo(int pageSize) {
+std::tuple<std::shared_ptr<struct Node>, std::shared_ptr<struct Node>> Node::splitTwo(int pageSize) {
   // Ignore the split if the page doesn't have at least enough nodes for
   // two pages or if the nodes can fit in a single page.
   if (inodes.size() <= (minKeysPerPage * 2) || sizeLessThan(pageSize)) {
-    return {this, nullptr};
+    return {shared_from_this(), nullptr};
   }
 
   // Determine the threshold before starting a new node.
-  auto fillPercent = bucket->FillPercent;
+  auto bucket_ptr = bucket.lock();
+  if (!bucket_ptr) return {nullptr, nullptr};
+  auto fillPercent = bucket_ptr->FillPercent;
   if (fillPercent < minFillPercent) {
     fillPercent = minFillPercent;
   } else if (fillPercent > maxFillPercent) {
@@ -282,22 +298,36 @@ std::tuple<struct Node *, struct Node *> Node::splitTwo(int pageSize) {
 
   // Split node into two separate nodes.
   // If there's no parent then we'll need to create one.
-  if (parent == nullptr) {
-    parent = new Node{.bucket = bucket, .children{this}};
+  if (parent.lock() == nullptr) {
+    auto new_parent = std::make_shared<Node>();
+    new_parent->bucket = bucket;
+    new_parent->children.push_back(shared_from_this());
+    parent = new_parent;
   }
 
   // Create a new node and add it to the parent.
-  auto next = new Node{.bucket = bucket, .isLeaf = isLeaf, .parent = parent};
-  parent->children.push_back(next);
+  auto next = std::make_shared<Node>();
+  next->bucket = bucket;
+  next->isLeaf = isLeaf;
+  next->parent = parent;
+  auto parent_ptr = parent.lock();
+  if (parent_ptr) {
+    parent_ptr->children.push_back(next);
+  }
 
   // Split inodes across two nodes.
   next->inodes.assign(inodes.begin() + split_index, inodes.end());  // = inodes[split_index:]
   inodes.resize(split_index);
 
   // Update the statistics.
-  bucket->tx->stats.Split++;
+  if (bucket_ptr) {
+    auto tx_ptr = bucket_ptr->tx.lock();
+    if (tx_ptr) {
+      tx_ptr->stats.Split++;
+    }
+  }
 
-  return {this, next};
+  return {shared_from_this(), next};
 }
 
 // splitIndex finds the position where a page will fill a given threshold.
@@ -328,7 +358,10 @@ std::tuple<int, int> Node::splitIndex(int threshold) {
 // spill writes the nodes to dirty pages and splits nodes as it goes.
 // Returns an error if dirty pages cannot be allocated.
 ErrorCode Node::spill() {
-  auto tx = bucket->tx;
+  auto bucket_ptr = bucket.lock();
+  if (!bucket_ptr) return ErrorCode::ErrTxClosed;
+  auto tx = bucket_ptr->tx.lock();
+  if (!tx) return ErrorCode::ErrTxClosed;
   if (spilled) {
     return ErrorCode::OK;
   }
@@ -347,16 +380,18 @@ ErrorCode Node::spill() {
   children.clear();
 
   // Split nodes into appropriate sizes. The first node will always be n.
-  auto nodes = split(tx->db->pageSize);
-  for (auto *node : nodes) {
+  auto db_ptr = tx->GetDB();
+  if (!db_ptr) return ErrorCode::ErrTxClosed;
+  auto nodes = split(db_ptr->pageSize);
+  for (auto node : nodes) {
     // Add node's page to the freelist if it's not new.
     if (node->pgid > 0) {
-      tx->db->freelist->free(tx->meta->txid, tx->page(node->pgid));
+      db_ptr->freelist->free(tx->meta->txid, tx->page(node->pgid));
       node->pgid = 0;
     }
 
     // Allocate contiguous space for the node.
-    auto [p, err] = tx->allocate((node->size() + tx->db->pageSize - 1) / tx->db->pageSize);
+    auto [p, err] = tx->allocate((node->size() + db_ptr->pageSize - 1) / db_ptr->pageSize);
     if (err != ErrorCode::OK) {
       return err;
     }
@@ -370,13 +405,16 @@ ErrorCode Node::spill() {
     node->spilled = true;
 
     // Insert into parent inodes.
-    if (node->parent != nullptr) {
+    if (node->parent.lock() != nullptr) {
       auto key = node->key;
       if (key.empty()) {
         key = node->inodes[0].key;
       }
 
-      node->parent->put(key, node->inodes[0].key, "", node->pgid, 0);
+      auto parent_ptr = node->parent.lock();
+      if (parent_ptr) {
+        parent_ptr->put(key, node->inodes[0].key, "", node->pgid, 0);
+      }
       node->key = node->inodes[0].key;
       _assert(node->key.size() > 0, "spill: zero-length node key");
     }
@@ -387,9 +425,10 @@ ErrorCode Node::spill() {
 
   // If the root node split and created a new root then we need to spill that
   // as well. We'll clear out the children to make sure it doesn't try to respill.
-  if (parent != nullptr && parent->pgid == 0) {
+  auto parent_ptr = parent.lock();
+  if (parent_ptr != nullptr && parent_ptr->pgid == 0) {
     children.clear();
-    return parent->spill();
+    return parent_ptr->spill();
   }
 
   return ErrorCode::OK;
@@ -404,34 +443,43 @@ void Node::rebalance() {
   unbalanced = false;
 
   // Update statistics.
-  bucket->tx->stats.Rebalance++;
+  auto bucket_ptr = bucket.lock();
+  if (bucket_ptr) {
+    auto tx_ptr = bucket_ptr->tx.lock();
+    if (tx_ptr) {
+      tx_ptr->stats.Rebalance++;
+    }
+  }
 
   // Ignore if node is above threshold (25%) and has enough keys.
-  auto threshold = bucket->tx->db->pageSize / 4;
+  if (!bucket_ptr) return;
+  auto tx_ptr = bucket_ptr->tx.lock();
+  if (!tx_ptr) return;
+  auto threshold = tx_ptr->GetDB()->pageSize / 4;
   if (size() > threshold && inodes.size() > minKeys()) {
     return;
   }
 
   // Root node has special handling.
-  if (parent == nullptr) {
+  if (parent.lock() == nullptr) {
     // If root node is a branch and only has one node then collapse it.
     if (!isLeaf && inodes.size() == 1) {
       // Move root's child up.
-      auto child = bucket->node(inodes[0].pgid, this);
+      auto child = bucket_ptr->node(inodes[0].pgid, shared_from_this());
       isLeaf = child->isLeaf;
       inodes = child->inodes;
       children = child->children;
 
       // Reparent all child nodes being moved.
       for (auto inode : inodes) {
-        if (auto it = bucket->nodes.find(inode.pgid); (it != bucket->nodes.end())) {
-          it->second->parent = this;
+        if (auto it = bucket_ptr->nodes.find(inode.pgid); (it != bucket_ptr->nodes.end())) {
+          it->second->parent = shared_from_this();
         }
       }
 
       // Remove old child.
-      child->parent = nullptr;
-      bucket->nodes.erase(child->pgid);
+      child->parent.reset();
+      bucket_ptr->nodes.erase(child->pgid);
       child->free();
     }
 
@@ -440,19 +488,26 @@ void Node::rebalance() {
 
   // If node has no keys then just remove it.
   if (numChildren() == 0) {
-    parent->del(key);
-    parent->removeChild(this);
-    bucket->nodes.erase(pgid);
+    auto parent_ptr = parent.lock();
+    if (parent_ptr) {
+      parent_ptr->del(key);
+      parent_ptr->removeChild(shared_from_this());
+    }
+    bucket_ptr->nodes.erase(pgid);
     this->free();
-    parent->rebalance();
+    if (parent_ptr) {
+      parent_ptr->rebalance();
+    }
     return;
   }
 
-  _assert(parent->numChildren() > 1, "parent must have at least 2 children");
+  auto parent_ptr = parent.lock();
+  if (!parent_ptr) return;
+  _assert(parent_ptr->numChildren() > 1, "parent must have at least 2 children");
 
   // Destination node is right sibling if idx == 0, otherwise left sibling.
-  Node *target = nullptr;
-  auto useNextSibling = (parent->childIndex(this) == 0);
+  std::shared_ptr<Node> target = nullptr;
+  auto useNextSibling = (parent_ptr->childIndex(shared_from_this()) == 0);
   if (useNextSibling) {
     target = nextSibling();
   } else {
@@ -463,46 +518,52 @@ void Node::rebalance() {
   if (useNextSibling) {
     // Reparent all child nodes being moved.
     for (auto &inode : target->inodes) {
-      if (auto it = bucket->nodes.find(inode.pgid); it != bucket->nodes.end()) {
+      if (auto it = bucket_ptr->nodes.find(inode.pgid); it != bucket_ptr->nodes.end()) {
         auto &child = it->second;
-        child->parent->removeChild(child);
-        child->parent = this;
-        child->parent->children.emplace_back(child);
+        auto child_parent = child->parent.lock();
+        if (child_parent) {
+          child_parent->removeChild(child);
+        }
+        child->parent = shared_from_this();
+        children.emplace_back(child);
       }
     }
 
     // Copy over inodes from target and remove target.
     inodes.insert(inodes.end(), target->inodes.begin(), target->inodes.end());
-    parent->del(target->key);
-    parent->removeChild(target);
-    bucket->nodes.erase(target->pgid);
+    parent_ptr->del(target->key);
+    parent_ptr->removeChild(target);
+    bucket_ptr->nodes.erase(target->pgid);
     target->free();
   } else {
     // Reparent all child nodes being moved.
     for (auto &inode : inodes) {
-      if (auto it = bucket->nodes.find(inode.pgid); it != bucket->nodes.end()) {
+      if (auto it = bucket_ptr->nodes.find(inode.pgid); it != bucket_ptr->nodes.end()) {
         auto &child = it->second;
-        child->parent->removeChild(child);
+        auto child_parent = child->parent.lock();
+        if (child_parent) {
+          child_parent->removeChild(child);
+        }
         child->parent = target;
-        child->parent->children.emplace_back(child);
+        target->children.emplace_back(child);
       }
     }
 
     // Copy over inodes to target and remove node.
     target->inodes.insert(target->inodes.end(), inodes.begin(), inodes.end());
-    parent->del(key);
-    parent->removeChild(this);
-    bucket->nodes.erase(pgid);
+    parent_ptr->del(key);
+    parent_ptr->removeChild(shared_from_this());
+    bucket_ptr->nodes.erase(pgid);
     this->free();
   }
 
   // Either this node or the target node was deleted from the parent so rebalance it.
-  parent->rebalance();
+  parent_ptr->rebalance();
 }
 
 // removes a node from the list of in-memory children.
 // This does not affect the inodes.
-void Node::removeChild(Node *target) {
+void Node::removeChild(std::shared_ptr<Node> target) {
   for (auto it = children.begin(); it != children.end(); ++it) {
     if (*it == target) {
       children.erase(it);
@@ -521,8 +582,7 @@ void Node::dereference() {
   }
 
   for (auto &inode : inodes) {
-    auto tmp_key = inode.key;
-    inode.key = tmp_key;
+    // No need to copy string to itself
     _assert(inode.key.size() > 0, "dereference: zero-length inode key");
 
     auto tmp_value = inode.value;
@@ -530,18 +590,30 @@ void Node::dereference() {
   }
 
   // Recursively dereference children.
-  for (auto *child : children) {
+  for (auto &child : children) {
     child->dereference();
   }
 
   // Update statistics.
-  bucket->tx->stats.NodeDeref++;
+  auto bucket_ptr = bucket.lock();
+  if (bucket_ptr) {
+    auto tx_ptr = bucket_ptr->tx.lock();
+    if (tx_ptr) {
+      tx_ptr->stats.NodeDeref++;
+    }
+  }
 }
 
 // free adds the node's underlying page to the freelist.
 void Node::free() {
   if (pgid != 0) {
-    bucket->tx->db->freelist->free(bucket->tx->meta->txid, bucket->tx->page(pgid));
+    auto bucket_ptr = bucket.lock();
+    if (bucket_ptr) {
+      auto tx_ptr = bucket_ptr->tx.lock();
+      if (tx_ptr) {
+        tx_ptr->GetDB()->freelist->free(tx_ptr->meta->txid, tx_ptr->page(pgid));
+      }
+    }
     pgid = 0;
   }
 }

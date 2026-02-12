@@ -35,3 +35,4 @@
 .xmake/
 build
 compile_commands.json
+tests/*.db

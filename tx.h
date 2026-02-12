@@ -62,13 +62,14 @@ struct TxStats {
 // them. Pages can not be reclaimed by the writer until no more transactions
 // are using them. A long running read transaction can cause the database to
 // quickly grow.
-struct Tx {
+struct Tx : public std::enable_shared_from_this<Tx> {
   bool writable = false;
   bool managed;
-  DB *db = nullptr;
-  Meta *meta = nullptr;
-  Bucket *root = nullptr;
+  std::shared_ptr<DB> db;
+  std::unique_ptr<Meta> meta;
+  std::shared_ptr<Bucket> root;
   std::map<pgid_t, Page *> pages;
+  std::vector<std::unique_ptr<char[]>> page_buffers;  // owns allocated page memory
   TxStats stats;
   std::vector<std::function<void()>> commitHandlers;
 
@@ -80,18 +81,18 @@ struct Tx {
   // set the flag to syscall.O_DIRECT to avoid trashing the page cache.
   int WriteFlag;
 
-  void init(DB *db);
+  void init(std::shared_ptr<DB> db);
   int ID();
-  DB *GetDB();
+  std::shared_ptr<DB> GetDB();
   int64_t Size();
   bool Writable();
-  Cursor *GetCursor();
+  std::unique_ptr<Cursor> GetCursor();
   const TxStats &Stats();
-  Bucket *FindBucketByName(std::string_view name);
-  std::tuple<struct Bucket *, ErrorCode> CreateBucket(std::string_view name);
-  std::tuple<struct Bucket *, ErrorCode> CreateBucketIfNotExists(std::string_view name);
+  std::shared_ptr<Bucket> FindBucketByName(std::string_view name);
+  std::tuple<std::shared_ptr<Bucket>, ErrorCode> CreateBucket(std::string_view name);
+  std::tuple<std::shared_ptr<Bucket>, ErrorCode> CreateBucketIfNotExists(std::string_view name);
   ErrorCode DeleteBucket(std::string_view name);
-  ErrorCode ForEach(std::function<ErrorCode(std::string_view, struct Bucket *)> fn);
+  ErrorCode ForEach(std::function<ErrorCode(std::string_view, const std::shared_ptr<Bucket> &)> fn);
   void OnCommit(std::function<void()> fn);
   ErrorCode Commit();
   ErrorCode commitFreelist();
@@ -110,7 +111,7 @@ struct Tx {
   ErrorCode write();
   ErrorCode writeMeta();
   Page *page(pgid_t id);
-  void forEachPage(pgid_t pgid, int depth, std::function<void(struct Page *, int)> fn);
+  void forEachPage(pgid_t pgid, int depth, std::function<void(Page *, int)> fn);
   std::tuple<std::unique_ptr<struct PageInfo>, ErrorCode> GetPageInfo(int id);
 };
 

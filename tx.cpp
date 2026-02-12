@@ -28,16 +28,15 @@ using std::string_view;
 namespace bboltpp {
 
 // init initializes the transaction.
-void Tx::init(class DB *db) {
+void Tx::init(std::shared_ptr<DB> db) {
   this->db = db;
 
   // Copy the meta page since it can be changed by the writer.
-  this->meta = new struct Meta;  //&meta{}
-  db->GetMeta()->copy(this->meta);
+  this->meta = std::make_unique<Meta>();
+  db->GetMeta()->copy(this->meta.get());
 
   // Copy over the root bucket.
-  this->root = newBucket(this);
-  // this->root->bucket = new bucket{};
+  this->root = newBucket(shared_from_this());
   this->root->bucket = this->meta->root;
 
   // Increment the transaction id and add a page cache for writable transactions.
@@ -51,10 +50,10 @@ void Tx::init(class DB *db) {
 int Tx::ID() { return static_cast<int>(this->meta->txid); }
 
 // DB returns a reference to the database that created the transaction.
-DB *Tx::GetDB() { return this->db; }
+std::shared_ptr<DB> Tx::GetDB() { return this->db; }
 
 // Size returns current database size in bytes as seen by this transaction.
-int64_t Tx::Size() { return static_cast<int64_t>(this->meta->pgid) * static_cast<int64_t>(this->db->pageSize); }
+int64_t Tx::Size() { return static_cast<int64_t>(this->meta->pgid) * static_cast<int64_t>(db->pageSize); }
 
 // Writable returns whether the transaction can perform write operations.
 bool Tx::Writable() { return this->writable; }
@@ -63,7 +62,7 @@ bool Tx::Writable() { return this->writable; }
 // All items in the cursor will return a nullptr value because all root bucket keys point to buckets.
 // The cursor is only valid as long as the transaction is open.
 // Do not use a cursor after the transaction is closed.
-Cursor *Tx::GetCursor() { return this->root->NewCursor(); }
+std::unique_ptr<Cursor> Tx::GetCursor() { return this->root->NewCursor(); }
 
 // Stats retrieves a copy of the current transaction statistics.
 const TxStats &Tx::Stats() { return this->stats; }
@@ -71,17 +70,19 @@ const TxStats &Tx::Stats() { return this->stats; }
 // Bucket retrieves a bucket by name.
 // Returns nullptr if the bucket does not exist.
 // The bucket instance is only valid for the lifetime of the transaction.
-Bucket *Tx::FindBucketByName(string_view name) { return this->root->FindBucketByName(name); }
+std::shared_ptr<Bucket> Tx::FindBucketByName(string_view name) { return this->root->FindBucketByName(name); }
 
 // CreateBucket creates a new bucket.
 // Returns an error if the bucket already exists, if the bucket name is blank, or if the bucket name is too long.
 // The bucket instance is only valid for the lifetime of the transaction.
-std::tuple<Bucket *, ErrorCode> Tx::CreateBucket(string_view name) { return this->root->CreateBucket(name); }
+std::tuple<std::shared_ptr<Bucket>, ErrorCode> Tx::CreateBucket(string_view name) {
+  return this->root->CreateBucket(name);
+}
 
 // CreateBucketIfNotExists creates a new bucket if it doesn't already exist.
 // Returns an error if the bucket name is blank, or if the bucket name is too long.
 // The bucket instance is only valid for the lifetime of the transaction.
-std::tuple<Bucket *, ErrorCode> Tx::CreateBucketIfNotExists(string_view name) {
+std::tuple<std::shared_ptr<Bucket>, ErrorCode> Tx::CreateBucketIfNotExists(string_view name) {
   return this->root->CreateBucketIfNotExists(name);
 }
 
@@ -92,7 +93,7 @@ ErrorCode Tx::DeleteBucket(string_view name) { return this->root->DeleteBucket(n
 // ForEach executes a function for each bucket in the root.
 // If the provided function returns an error then the iteration is stopped and
 // the error is returned to the caller.
-ErrorCode Tx::ForEach(std::function<ErrorCode(string_view, struct Bucket *)> fn) {
+ErrorCode Tx::ForEach(std::function<ErrorCode(std::string_view, const std::shared_ptr<Bucket> &)> fn) {
   return this->root->ForEach(
       [this, &fn](string_view k, string_view v) -> ErrorCode { return fn(k, this->root->FindBucketByName(k)); });
 }
@@ -221,6 +222,7 @@ ErrorCode Tx::Rollback() {
   if (this->db == nullptr) {
     return ErrorCode::ErrTxClosed;
   }
+
   this->nonPhysicalRollback();
   return ErrorCode::OK;
 }
@@ -231,6 +233,7 @@ void Tx::nonPhysicalRollback() {
   if (this->db == nullptr) {
     return;
   }
+
   if (this->writable) {
     this->db->freelist->rollback(this->meta->txid);
   }
@@ -242,6 +245,7 @@ void Tx::rollback() {
   if (this->db == nullptr) {
     return;
   }
+
   if (this->writable) {
     this->db->freelist->rollback(this->meta->txid);
     if (!this->db->hasSyncedFreelist()) {
@@ -261,6 +265,7 @@ void Tx::close() {
   if (this->db == nullptr) {
     return;
   }
+
   if (this->writable) {
     // Grab freelist stats.
     auto freelistFreeN = this->db->freelist->FreeCount();
@@ -268,7 +273,7 @@ void Tx::close() {
     auto freelistAlloc = this->db->freelist->size();
 
     // Remove transaction ref & writer lock.
-    this->db->rwtx = nullptr;
+    this->db->rwtx.reset();
     this->db->rwlock.unlock();
 
     // Merge statistics.
@@ -284,9 +289,10 @@ void Tx::close() {
   }
 
   // Clear all references.
-  this->db = nullptr;
+  this->db.reset();
   this->meta = nullptr;
-  this->root = newBucket(this);
+  this->root = newBucket(shared_from_this());
+  // this->root = nullptr;
   this->pages.clear();
 }
 
@@ -427,7 +433,7 @@ std::vector<Error> Tx::Check() {
   }
 
   // Track every reachable page.
-  std::map<pgid_t, struct Page *> reachable;
+  std::map<pgid_t, Page *> reachable;
   reachable[0] = this->page(0);  // meta0
   reachable[1] = this->page(1);  // meta1
   if (this->meta->freelist != pgidNoFreelist) {
@@ -437,7 +443,7 @@ std::vector<Error> Tx::Check() {
   }
 
   // Recursively check buckets.
-  this->checkBucket(this->root, reachable, freed, ch);
+  this->checkBucket(this->root.get(), reachable, freed, ch);
 
   // Ensure all pages below high water mark are either reachable or freed.
   for (pgid_t i = 0; i < this->meta->pgid; i++) {
@@ -453,7 +459,7 @@ std::vector<Error> Tx::Check() {
   return ch;
 }
 
-void Tx::checkBucket(struct Bucket *b, std::map<pgid_t, struct Page *> &reachable, std::map<pgid_t, bool> &freed,
+void Tx::checkBucket(struct Bucket *b, std::map<pgid_t, Page *> &reachable, std::map<pgid_t, bool> &freed,
                      std::vector<Error> &ch) {
   // Ignore inline buckets.
   if (b->bucket.root == 0) {
@@ -487,7 +493,7 @@ void Tx::checkBucket(struct Bucket *b, std::map<pgid_t, struct Page *> &reachabl
   // Check each bucket within this bucket.
   b->ForEach([&](std::string_view k, std::string_view v) -> ErrorCode {
     if (auto child = b->FindBucketByName(k); child != nullptr) {
-      this->checkBucket(child, reachable, freed, ch);
+      this->checkBucket(child.get(), reachable, freed, ch);
     }
     return ErrorCode::OK;
   });
@@ -618,7 +624,7 @@ struct Page *Tx::page(pgid_t id) {
 }
 
 // forEachPage iterates over every page within a given page and executes a function.
-void Tx::forEachPage(pgid_t pgid, int depth, std::function<void(struct Page *, int)> fn) {
+void Tx::forEachPage(pgid_t pgid, int depth, std::function<void(Page *, int)> fn) {
   auto p = this->page(pgid);
 
   // Execute function.

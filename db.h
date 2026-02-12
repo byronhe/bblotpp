@@ -34,7 +34,7 @@ constexpr uint32_t kMetaMagic = 0xED0CDAED;
 constexpr pgid_t pgidNoFreelist = 0xffffffffffffffff;
 
 // IgnoreNoSync specifies whether the NoSync field of a DB is ignored when
-// syncing changes to a file.  This is required as some operating systems,
+// syncing changes to a file. This is required as some operating systems,
 // such as OpenBSD, do not have a unified buffer cache (UBC) and writes
 // must be synchronized using the msync(2) syscall.
 bool IgnoreNoSync();
@@ -49,7 +49,7 @@ constexpr size_t DefaultAllocSize = 16 * 1024 * 1024;
 size_t defaultPageSize();
 
 struct Info {
-  const char *Data = 0;
+  const char *Data = nullptr;
   int PageSize = 0;
 };
 
@@ -67,12 +67,6 @@ struct Meta {
   ErrorCode validate();
   void copy(struct Meta *dest) const;
   void write(struct Page *p);
-
-  template <typename H>
-  friend H AbslHashValue(H h, const Meta &m) {
-    return H::combine(std::move(h), m.magic, m.version, m.pageSize, m.flags, m.flags, m.root, m.freelist, m.pgid,
-                      m.txid);
-  }
 
   uint64_t sum64();
 };
@@ -120,7 +114,7 @@ struct Batch {
 // All data access is performed through transactions which can be obtained
 // through the DB. All the functions on DB will return a ErrDatabaseNotOpen if
 // accessed before Open() is called.
-class DB {
+class DB : public std::enable_shared_from_this<DB> {
  public:
   // When enabled, the database will perform a Check() after every commit.
   // A panic is issued if the database is in an inconsistent state. This
@@ -197,8 +191,8 @@ class DB {
   Meta *meta1 = nullptr;
   int pageSize = 0;
   bool opened = false;
-  Tx *rwtx = nullptr;
-  std::vector<Tx *> txs;
+  std::weak_ptr<Tx> rwtx;
+  std::vector<std::weak_ptr<Tx>> txs;
   Stats stats;
   std::unique_ptr<FreeList> freelist;
 
@@ -214,7 +208,7 @@ class DB {
   std::shared_mutex mmaplock;  // Protects mmap access during remapping.
   std::shared_mutex statlock;  // Protects stats access.
 
-  struct ops {
+  struct Operations {
     std::function<std::tuple<int, Error>(std::string_view b, int64_t offset)> writeAt;
     // writeAt func(b[] byte, off int64)(n int, err error)
   } ops;
@@ -228,7 +222,7 @@ class DB {
   std::string Path();
   std::string GoString();
   std::string String();
-  static std::tuple<std::unique_ptr<DB>, Error> Open(std::string_view path, uint32_t mode, const Options *options_ptr);
+  static std::tuple<std::shared_ptr<DB>, Error> Open(std::string_view path, uint32_t mode, const Options *options_ptr);
   void loadFreelist();
   bool hasSyncedFreelist();
   Error mmap(int minsz);
@@ -240,9 +234,9 @@ class DB {
   Error init();
   Error Close();
   Error close();
-  std::tuple<std::unique_ptr<Tx>, Error> Begin(bool writable);
-  std::tuple<std::unique_ptr<Tx>, Error> beginTx();
-  std::tuple<std::unique_ptr<Tx>, Error> beginRWTx();
+  std::tuple<std::shared_ptr<Tx>, Error> Begin(bool writable);
+  std::tuple<std::shared_ptr<Tx>, Error> beginTx();
+  std::tuple<std::shared_ptr<Tx>, Error> beginRWTx();
   void freePages();
   void removeTx(Tx *tx);
   Error Update(std::function<Error(Tx *)> fn);
@@ -266,15 +260,15 @@ struct Options {
   // Timeout is the amount of time to wait to obtain a file lock.
   // When set to zero it will wait indefinitely. This option is only
   // available on Darwin and Linux.
-  std::chrono::milliseconds Timeout;  // time.Duration
+  std::chrono::milliseconds Timeout{0};  // time.Duration
 
   // Sets the DB.NoGrowSync flag before memory mapping the file.
-  bool NoGrowSync;
+  bool NoGrowSync = false;
 
   // Do not sync freelist to disk. This improves the database write
   // performance under normal operation, but requires a full database
   // re-sync during recovery.
-  bool NoFreelistSync;
+  bool NoFreelistSync = false;
 
   // FreelistType sets the backend freelist type. There are two options. Array
   // which is simple but endures dramatic performance degradation if database is
@@ -282,39 +276,39 @@ struct Options {
   // hashmap, it is faster in almost all circumstances but it doesn't guarantee
   // that it offers the smallest page id available. In normal case it is safe.
   // The default type is array
-  FreelistType free_list_type_;
+  FreelistType free_list_type_ = FreelistType::FreelistArrayType;
 
   // Open database in read-only mode. Uses flock(..., LOCK_SH |LOCK_NB) to grab
   // a shared lock (UNIX).
-  bool ReadOnly;
+  bool ReadOnly = false;
 
   // Sets the DB.MmapFlags flag before memory mapping the file.
-  int MmapFlags;
+  int MmapFlags = 0;
 
   // InitialMmapSize is the initial mmap size of the database in bytes. Read
   // transactions won't block write transaction if the InitialMmapSize is large
   // enough to hold database mmap size. (See DB.Begin for more information) If
   // <=0, the initial map size is 0.  If initialMmapSize is smaller than the
   // previous database size, it takes no effect.
-  int InitialMmapSize;
+  int InitialMmapSize = 0;
 
   // PageSize overrides the default OS page size.
-  int PageSize;
+  int PageSize = 0;
 
   // NoSync sets the initial value of DB.NoSync. Normally this can just be set
   // directly on the DB itself when returned from Open(), but this option is
   // useful in APIs which expose Options but not the underlying DB.
-  bool NoSync;
+  bool NoSync = false;
 
   // OpenFile is used to open files.  It defaults to os.OpenFile.  This option
   // is useful for writing hermetic tests.
-  OpenFileFunc openFile;
+  OpenFileFunc openFile = nullptr;
   // OpenFile func(string, int, os.FileMode)(*os.File, error)
 
   // Mlock locks database file in memory when set to true.  It prevents
   // potential page faults, however used memory can't be reclaimed. (UNIX
   // only)
-  bool Mlock;
+  bool Mlock = false;
 };
 
 }  // namespace bboltpp

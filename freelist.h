@@ -19,7 +19,7 @@ enum class FreelistType {
 
 // txPending holds a list of pgid_vec and corresponding allocation txns
 // that are pending to be freed.
-struct txPending {
+struct TxPending {
   pgid_vec ids;
   std::vector<txid_t> alloctx;  // txids allocating the ids
   txid_t lastReleaseBegin = 0;  // beginning txid of last matching releaseRange
@@ -35,13 +35,14 @@ struct FreeList {
   FreelistType freelistType;               // freelist type
   pgid_vec ids;                            // all free and available free page ids.
   std::map<pgid_t, txid_t> allocs;         // mapping of txid that allocated a pgid.
-  std::map<txid_t, txPending> pending;     // mapping of soon-to-be free page ids by tx.
+  std::map<txid_t, TxPending> pending;     // mapping of soon-to-be free page ids by tx.
   std::map<pgid_t, bool> cache;            // fast lookup of all free and pending page ids.
   std::map<uint64_t, pidSet> freemaps;     // key is the size of continuous pages(span), value is a set
                                            // which contains the starting pgid_vec of same size
   std::map<pgid_t, uint64_t> forwardMap;   // key is start pgid, value is its span size
   std::map<pgid_t, uint64_t> backwardMap;  // key is end pgid, value is its span size
 
+  virtual ~FreeList() = default;
   virtual pgid_t Allocate(txid_t, int) = 0;      // the freelist allocate func
   virtual int FreeCount() = 0;                   // the function which gives you free page number
   virtual void MergeSpans(pgid_vec &pgids) = 0;  // the mergeSpan func
