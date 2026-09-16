@@ -322,27 +322,6 @@ ErrorCode Bucket::SetSequence(uint64_t v) {
   return ErrorCode::OK;
 }
 
-// NextSequence returns an autoincrementing integer for the bucket.
-std::tuple<uint64_t, ErrorCode> Bucket::NextSequence() {
-  auto tx_ptr = tx.lock();
-  if (!tx_ptr || tx_ptr->GetDB() == nullptr) {
-    return {0, ErrorCode::ErrTxClosed};
-  } else if (!Writable()) {
-    return {0, ErrorCode::ErrTxNotWritable};
-  }
-
-  // Materialize the root node if it hasn't been already so that the
-  // bucket will be saved during commit.
-  if (rootNode == nullptr) {
-    auto _ = node(bucket.root, nullptr);
-    (void)_;
-  }
-
-  // Increment and return the sequence.
-  bucket.sequence++;
-  return {bucket.sequence, ErrorCode::OK};
-}
-
 // ForEach executes a function for each key/value pair in a bucket.
 // If the provided function returns an error then the iteration is stopped and
 // the error is returned to the caller. The provided function must not modify

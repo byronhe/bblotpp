@@ -75,7 +75,6 @@ struct Bucket : public std::enable_shared_from_this<Bucket> {
   ErrorCode Delete(std::string_view key);
   uint64_t Sequence();
   ErrorCode SetSequence(uint64_t v);
-  std::tuple<uint64_t, ErrorCode> NextSequence();
   ErrorCode ForEach(std::function<ErrorCode(std::string_view, std::string_view)> fn);
   BucketStats Stats();
   void forEachPage(std::function<void(Page *, int)> fn);
