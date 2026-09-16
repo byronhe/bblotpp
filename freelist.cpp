@@ -137,13 +137,19 @@ void FreeList::free(txid_t txid, Page *p) {
 // release moves all page ids for a transaction id (or older) to the freelist.
 void FreeList::release(txid_t txid) {
   pgid_vec m;
+  std::vector<txid_t> toErase;
   for (auto &[tid, txp] : pending) {
     if (tid <= txid) {
       // Move transaction's pending pages to the available freelist.
       // Don't remove from the cache since the page is still free.
       m.insert(m.end(), txp.ids.begin(), txp.ids.end());
-      pending.erase(tid);
+      toErase.push_back(tid);
     }
+  }
+  // Erasing the current node during a range-for over std::map invalidates
+  // the iterator; defer the erase until after the iteration completes.
+  for (auto tid : toErase) {
+    pending.erase(tid);
   }
   MergeSpans(m);
 }
@@ -154,6 +160,7 @@ void FreeList::releaseRange(txid_t begin, txid_t end) {
     return;
   }
   pgid_vec m;
+  std::vector<txid_t> toErase;
   for (auto &[tid, txp] : pending) {
     if (tid < begin || tid > end) {
       continue;
@@ -176,8 +183,13 @@ void FreeList::releaseRange(txid_t begin, txid_t end) {
     }
     txp.lastReleaseBegin = begin;
     if (txp.ids.size() == 0) {
-      pending.erase(tid);
+      toErase.push_back(tid);
     }
+  }
+  // Erasing the current node during a range-for over std::map invalidates
+  // the iterator; defer the erase until after the iteration completes.
+  for (auto tid : toErase) {
+    pending.erase(tid);
   }
   MergeSpans(m);
 }

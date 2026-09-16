@@ -182,6 +182,13 @@ target("test_internal_freelist_hashmap")
     add_packages("abseil", "fmt", "gtest")
     add_files("tests/internal_freelist_hashmap_test.cpp")
 
+target("test_freelist_erase_regression")
+    set_kind("binary")
+    set_languages("c++17")
+    add_deps("bbolt_pp")
+    add_packages("abseil", "fmt", "gtest")
+    add_files("tests/freelist_erase_regression_test.cpp")
+
 target("test_internal_common_page")
     set_kind("binary")
     set_languages("c++17")
