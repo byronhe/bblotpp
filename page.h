@@ -9,6 +9,8 @@
 #include <string_view>
 #include <vector>
 
+#include "verify.h"
+
 namespace bboltpp {
 
 constexpr std::size_t minKeysPerPage = 2;
@@ -137,12 +139,6 @@ inline pgid_vec merge(const pgid_vec &a, const pgid_vec &b) {
 // void mergepgids(pgid_vec &a, pgid_vec &b, pgid_vec &dst) {
 // }
 void mergepgids(pgid_vec &dst, const pgid_vec &a, const pgid_vec &b);
-
-#define panic(code) \
-  {                 \
-    (void)code;     \
-    abort();        \
-  }
 
 #define _assert(condition, message) assert((condition) && message)
 

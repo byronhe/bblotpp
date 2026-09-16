@@ -108,7 +108,7 @@ pgid_t ArrayFreeList::Allocate(txid_t txid, int n) {
 // If the page is already free then a panic will occur.
 void FreeList::free(txid_t txid, Page *p) {
   if (p->id <= 1) {
-    panic(absl::StrFormat("cannot free page 0 or 1: %lu", p->id))
+    panic(absl::StrFormat("cannot free page 0 or 1: %lu", p->id));
   }
 
   // Free page and all its overflow pages.
@@ -125,7 +125,7 @@ void FreeList::free(txid_t txid, Page *p) {
   for (auto id = p->id; id <= p->id + pgid_t(p->overflow); id++) {
     // Verify that page is not already free.
     if (cache.find(id) != cache.end()) {
-      panic(absl::StrFormat("page %lu already freed", id))
+      panic(absl::StrFormat("page %lu already freed", id));
     }
     // Add to the freelist and cache.
     txp.ids.emplace_back(id);
@@ -236,7 +236,7 @@ void FreeList::read(Page *p) {
     // c := *(*pgid)(unsafeAdd(unsafe.Pointer(p), unsafe.Sizeof(*p)))
     count = int(c);
     if (count < 0) {
-      panic(absl::StrFormat("leading element count %lu overflows int", c))
+      panic(absl::StrFormat("leading element count %lu overflows int", c));
     }
   }
 
