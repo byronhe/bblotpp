@@ -370,8 +370,8 @@ ErrorCode Node::spill() {
   // the case of split-merge so we cannot use a range loop. We have to check
   // the children size on every loop iteration.
   std::sort(children.begin(), children.end());
-  for (auto &child : children) {
-    if (auto err = child->spill(); err != ErrorCode::OK) {
+  for (size_t i = 0; i < children.size(); ++i) {
+    if (auto err = children[i]->spill(); err != ErrorCode::OK) {
       return err;
     }
   }

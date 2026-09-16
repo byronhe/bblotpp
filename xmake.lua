@@ -1,6 +1,13 @@
 add_rules("mode.debug")
 set_warnings("all")
 set_languages("c++17")
+
+-- AddressSanitizer/UBSan are opt-in via `xmake f -m asan`. Inert in the
+-- default build so the shipped library is not sanitizer-instrumented.
+if is_mode("asan") then
+    set_policy("build.sanitizer.address", true)
+    set_policy("build.sanitizer.undefined", true)
+end
 add_requires("abseil",{system = false})
 add_requires("fmt",{system = false})
 add_requires("gtest",{system = false})
@@ -232,3 +239,10 @@ target("test_special_robustness")
     add_deps("bbolt_pp")
     add_packages("abseil", "fmt", "gtest")
     add_files("tests/special_robustness_test.cpp")
+
+target("test_spill_repro")
+    set_kind("binary")
+    set_languages("c++17")
+    add_deps("bbolt_pp")
+    add_packages("abseil", "fmt", "gtest")
+    add_files("tests/spill_repro_test.cpp")
