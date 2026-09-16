@@ -71,7 +71,7 @@ KeyValue Cursor::Prev() {
 
   // Attempt to move back one element until we're successful.
   // Move up the stack as we hit the beginning of each page in our stack.
-  for (size_t i = stack.size() - 1; i >= 0; i--) {
+  for (int i = (int)stack.size() - 1; i >= 0; i--) {
     auto &elem = stack[i];
     if (elem.index > 0) {
       elem.index--;

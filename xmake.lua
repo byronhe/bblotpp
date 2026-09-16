@@ -68,6 +68,13 @@ target("test_bucket_simple")
     add_packages("abseil", "fmt", "gtest")
     add_files("tests/bucket_test_simple.cpp")
 
+target("test_cursor_prev")
+    set_kind("binary")
+    set_languages("c++17")
+    add_deps("bbolt_pp")
+    add_packages("abseil", "fmt", "gtest")
+    add_files("tests/cursor_prev_test.cpp")
+
 -- New test targets
 target("test_node")
     set_kind("binary")
