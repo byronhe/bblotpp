@@ -224,6 +224,89 @@ TEST_F(DBTestSimple, TestDifferentFreelistTypes) {
     // Clean up
 }
 
+// Regression test for the freelist serialization bug: reopening a database
+// after a write transaction that leaves a non-empty freelist must not corrupt
+// the in-memory freelist. With the buggy FreeList::write (page body left
+// zeroed), the default FreelistArrayType aborted in ArrayFreeList::Allocate on
+// reload (id <= 1 panic). This exercises the full commit -> close -> reopen ->
+// write -> commit cycle that triggered the crash.
+TEST_F(DBTestSimple, TestFreelistDiskRoundTrip_Array) {
+    std::string path = "test_freelist_disk_array.db";
+    Options options;
+    options.free_list_type_ = FreelistType::FreelistArrayType;
+    options.NoFreelistSync = false;
+
+    // Session 1: create a bucket and write data. The commit frees the prior
+    // freelist page (allocated during Open's forced sync), so the on-disk
+    // freelist is non-empty (count() >= 1) when FreeList::write runs.
+    {
+        auto [db, err] = DB::Open(path, 0600, &options);
+        ASSERT_TRUE(err.OK());
+
+        auto [tx, txErr] = db->Begin(true);
+        ASSERT_TRUE(txErr.OK());
+
+        auto [bucket, bErr] = tx->CreateBucket("widgets");
+        ASSERT_EQ(ErrorCode::OK, bErr);
+
+        std::string val(16, 'x');
+        for (int i = 0; i < 10; ++i) {
+            ASSERT_EQ(ErrorCode::OK, bucket->Put("key" + std::to_string(i), val));
+        }
+        ASSERT_EQ(ErrorCode::OK, tx->Commit());
+
+        auto closeErr = db->Close();
+        ASSERT_TRUE(closeErr.OK());
+    }
+
+    // Session 2: reopen and perform another write. On the buggy code this
+    // commit aborts the process in ArrayFreeList::Allocate on a zero page id.
+    {
+        auto [db2, err2] = DB::Open(path, 0600, &options);
+        ASSERT_TRUE(err2.OK());
+
+        auto [tx2, tx2Err] = db2->Begin(true);
+        ASSERT_TRUE(tx2Err.OK());
+
+        auto [b2, b2Err] = tx2->CreateBucketIfNotExists("widgets");
+        ASSERT_EQ(ErrorCode::OK, b2Err);
+        ASSERT_EQ(ErrorCode::OK, b2->Put("after_reopen_key", "after_reopen_val"));
+        ASSERT_EQ(ErrorCode::OK, tx2->Commit());
+
+        auto closeErr = db2->Close();
+        ASSERT_TRUE(closeErr.OK());
+    }
+
+    // Session 3: reopen read-only and verify all data round-trips intact.
+    {
+        auto [db3, err3] = DB::Open(path, 0600, &options);
+        ASSERT_TRUE(err3.OK());
+
+        auto [tx3, tx3Err] = db3->Begin(false);
+        ASSERT_TRUE(tx3Err.OK());
+
+        auto b3 = tx3->FindBucketByName("widgets");
+        ASSERT_NE(nullptr, b3.get());
+
+        auto va = b3->Get("after_reopen_key");
+        ASSERT_TRUE(va.has_value());
+        ASSERT_EQ("after_reopen_val", std::string(va.value()));
+
+        auto v0 = b3->Get("key0");
+        ASSERT_TRUE(v0.has_value());
+        ASSERT_EQ(std::string(16, 'x'), std::string(v0.value()));
+
+        auto v9 = b3->Get("key9");
+        ASSERT_TRUE(v9.has_value());
+        ASSERT_EQ(std::string(16, 'x'), std::string(v9.value()));
+
+        auto closeErr = db3->Close();
+        ASSERT_TRUE(closeErr.OK());
+    }
+
+    std::filesystem::remove(path);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

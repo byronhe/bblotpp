@@ -210,23 +210,116 @@ TEST_F(InternalFreelistTest, TestFreelist_write) {
     auto f = newTestFreelist();
     std::vector<bboltpp::pgid_t> initIds = {12, 39};
     f->ReadIDs(initIds);
-    
+
     // Add some pending pages
     auto page1 = createTestPage(28);
     auto page2 = createTestPage(11);
     auto page3 = createTestPage(3);
-    
+
     f->free(100, &page1);
     f->free(100, &page2);
     f->free(101, &page3);
-    
-    // Test write functionality
-    bboltpp::Page page;
-    f->write(&page);
-    
-    // Test that the page was written correctly
-    ASSERT_EQ(bboltpp::freelistPageFlag, page.flags);
-    SUCCEED();
+
+    // Use a real page-sized buffer so the serialized page body has somewhere
+    // to land. A bare stack `Page` has no body storage and would overflow.
+    const size_t pageSize = 4096;
+    std::vector<uint8_t> buf(pageSize, 0);
+    bboltpp::Page *p = reinterpret_cast<bboltpp::Page *>(buf.data());
+    f->write(p);
+
+    // The header must be populated correctly.
+    ASSERT_EQ(bboltpp::freelistPageFlag, p->flags);
+    ASSERT_EQ(uint16_t(f->count()), p->count);
+
+    // The page body must round-trip back to the same free ids. count() here is
+    // FreeCount(2) + pending_count(3) == 5.
+    auto f2 = newTestFreelist();
+    f2->read(p);
+    auto readIds = f2->GetFreePageIDs();
+    std::sort(readIds.begin(), readIds.end());
+    std::vector<bboltpp::pgid_t> expected = {3, 11, 12, 28, 39};
+    ASSERT_EQ(expected, readIds);
+}
+
+// Serialize the freelist into a page and verify the raw page body bytes hold
+// the real ids (not zeros). Exercises the l < 0xFFFF branch.
+TEST_F(InternalFreelistTest, TestFreelist_WriteReadRoundTrip_Array) {
+    const size_t pageSize = 4096;
+    auto f = std::make_unique<bboltpp::ArrayFreeList>();
+    std::vector<bboltpp::pgid_t> initIds = {5, 6, 8};
+    f->ReadIDs(initIds);
+    std::vector<uint8_t> buf(pageSize, 0);
+    bboltpp::Page *p = reinterpret_cast<bboltpp::Page *>(buf.data());
+    f->write(p);
+
+    ASSERT_EQ(bboltpp::freelistPageFlag, p->flags);
+    ASSERT_EQ(uint16_t(initIds.size()), p->count);
+
+    // Body should hold exactly the sorted ids, not zeros.
+    const bboltpp::pgid_t *body =
+        reinterpret_cast<const bboltpp::pgid_t *>(reinterpret_cast<const char *>(p) + sizeof(*p));
+    for (size_t i = 0; i < initIds.size(); ++i) {
+        ASSERT_EQ(initIds[i], body[i]) << "page body id " << i << " is zeroed/wrong";
+    }
+
+    auto f2 = std::make_unique<bboltpp::ArrayFreeList>();
+    f2->read(p);
+    auto readIds = f2->GetFreePageIDs();
+    std::sort(readIds.begin(), readIds.end());
+    ASSERT_EQ(initIds, readIds);
+}
+
+// Round-trip the serialized freelist through a HashMapFreeList reader as well.
+TEST_F(InternalFreelistTest, TestFreelist_WriteReadRoundTrip_Hashmap) {
+    const size_t pageSize = 4096;
+    auto f = std::make_unique<bboltpp::HashMapFreeList>();
+    std::vector<bboltpp::pgid_t> initIds = {5, 6, 8};
+    f->ReadIDs(initIds);
+    std::vector<uint8_t> buf(pageSize, 0);
+    bboltpp::Page *p = reinterpret_cast<bboltpp::Page *>(buf.data());
+    f->write(p);
+
+    ASSERT_EQ(bboltpp::freelistPageFlag, p->flags);
+    ASSERT_EQ(uint16_t(initIds.size()), p->count);
+
+    auto f2 = std::make_unique<bboltpp::HashMapFreeList>();
+    f2->read(p);
+    auto readIds = f2->GetFreePageIDs();
+    std::sort(readIds.begin(), readIds.end());
+    ASSERT_EQ(initIds, readIds);
+}
+
+// Overflow branch: when count() >= 0xFFFF the size is stored as the first
+// page-body element and p->count is set to 0xFFFF. Verify the full list
+// round-trips.
+TEST_F(InternalFreelistTest, TestFreelist_WriteReadRoundTrip_Overflow_Array) {
+    auto f = std::make_unique<bboltpp::ArrayFreeList>();
+    std::vector<bboltpp::pgid_t> initIds;
+    const bboltpp::pgid_t n = 70000;
+    initIds.reserve(n);
+    for (bboltpp::pgid_t i = 1; i <= n; ++i) initIds.push_back(i + 100);
+    f->ReadIDs(initIds);
+    ASSERT_GE(f->count(), 0xFFFF);
+
+    size_t bufSize = sizeof(bboltpp::Page) + (size_t(f->count()) + 1) * sizeof(bboltpp::pgid_t);
+    std::vector<uint8_t> buf(bufSize, 0);
+    bboltpp::Page *p = reinterpret_cast<bboltpp::Page *>(buf.data());
+    f->write(p);
+
+    ASSERT_EQ(bboltpp::freelistPageFlag, p->flags);
+    ASSERT_EQ(uint16_t(0xFFFF), p->count);
+    // Leading body element holds the real count.
+    const bboltpp::pgid_t *body =
+        reinterpret_cast<const bboltpp::pgid_t *>(reinterpret_cast<const char *>(p) + sizeof(*p));
+    ASSERT_EQ(f->count(), int(body[0]));
+
+    auto f2 = std::make_unique<bboltpp::ArrayFreeList>();
+    f2->read(p);
+    auto readIds = f2->GetFreePageIDs();
+    std::sort(readIds.begin(), readIds.end());
+    std::vector<bboltpp::pgid_t> expected(initIds);
+    std::sort(expected.begin(), expected.end());
+    ASSERT_EQ(expected, readIds);
 }
 
 TEST_F(InternalFreelistTest, TestFreelist_E2E_HappyPath) {

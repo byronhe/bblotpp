@@ -1,5 +1,6 @@
 #include "freelist.h"
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <vector>
 #include "absl/strings/str_format.h"
@@ -283,20 +284,18 @@ ErrorCode FreeList::write(Page *p) {
     p->count = uint16_t(l);
   } else if (l < 0xFFFF) {
     p->count = uint16_t(l);
-    Page *data = unsafeAdd(p, sizeof(*p));
-    pgid_t *ids_ptr = reinterpret_cast<pgid_t *>(data);
-    pgid_vec ids(ids_ptr, ids_ptr + l);
+    pgid_vec ids;
     copyall(ids);
-    // TODO() p->append( &ids[0], ids.size() * sizeof(ids[0]) );
+    Page *data = unsafeAdd(p, sizeof(*p));
+    std::memcpy(static_cast<void *>(data), ids.data(), size_t(l) * sizeof(pgid_t));
   } else {
     p->count = 0xFFFF;
-    char *data = reinterpret_cast<char *>(p + 1);
+    pgid_vec ids;
+    copyall(ids);
+    Page *data = unsafeAdd(p, sizeof(*p));
     pgid_t *ids_ptr = reinterpret_cast<pgid_t *>(data);
-    pgid_vec ids(ids_ptr, ids_ptr + l + 1);
-    ids[0] = pgid_t(l);
-    pgid_vec tmp_ids(ids.begin() + 1, ids.end());
-    copyall(tmp_ids);
-    // TODO() p->append( &ids[0], ids.size() * sizeof(ids[0]) );
+    ids_ptr[0] = pgid_t(l);
+    std::memcpy(static_cast<void *>(ids_ptr + 1), ids.data(), size_t(l) * sizeof(pgid_t));
   }
 
   return ErrorCode::OK;
