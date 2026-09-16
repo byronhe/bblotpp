@@ -31,8 +31,13 @@ pgid_t HashMapFreeList::Allocate(txid_t txid, int n) {
   if (it != freemaps.end()) {
     auto size = it->first;
     for (auto &[pid, _] : it->second) {
-      // remove the span
-      delSpan(pid, uint64_t(n));
+      // remove the whole located span from all three indexes before
+      // re-adding the remainder. Passing `n` (the request size) instead of
+      // `size` (the located span size) when `n < size` corrupts freemaps and
+      // backwardMap: the real forwardMap/backwardMap/freemaps entries for the
+      // span are never erased and a stale orphan persists in freemaps, which
+      // can later be re-selected and hand out an already-allocated page id.
+      delSpan(pid, size);
       allocs[pid] = txid;
 
       auto remain = size - uint64_t(n);
