@@ -90,7 +90,7 @@ class Error {
   explicit Error() = default;
   explicit Error(ErrorCode ec) : err_code_(ec) {}
   explicit Error(int c) : int_code_(c == 0 ? 0 : errno), err_code_(c == 0 ? ErrorCode::OK : ErrorCode::ErrInvalid) {}
-  explicit Error(std::string msg) : err_msg_(std::move(msg)) {}
+  explicit Error(std::string msg) : err_code_(ErrorCode::ErrInvalid), err_msg_(std::move(msg)) {}
 
   bool OK() const { return err_code_ == ErrorCode::OK && int_code_ == 0 && err_msg_.empty(); }
 
