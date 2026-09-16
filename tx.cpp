@@ -125,6 +125,7 @@ ErrorCode Tx::Commit() {
 
   // spill data onto dirty pages.
   startTime = std::chrono::high_resolution_clock::now();
+  const pgid_t opgid = this->meta->pgid;
   if (auto err = this->root->spill(); err != ErrorCode::OK) {
     this->rollback();
     return err;
@@ -147,6 +148,19 @@ ErrorCode Tx::Commit() {
     }
   } else {
     this->meta->freelist = pgidNoFreelist;
+  }
+
+  // If the high water mark has moved up then attempt to grow the database.
+  // This must run for both NoFreelistSync branches, immediately before write(),
+  // because write()/writeMeta() flush with fdatasync(2) on Linux which does not
+  // durably persist file-size (i_size) metadata after an extending pwrite.
+  // grow() issues Truncate()+fsync() to durably flush the file size first.
+  // https://github.com/boltdb/bolt/issues/284
+  if (this->meta->pgid > opgid) {
+    if (auto err = this->db->grow(int(this->meta->pgid + 1) * this->db->pageSize); not err.OK()) {
+      this->rollback();
+      return err.err_code_;
+    }
   }
 
   // Write dirty pages to disk.
@@ -193,7 +207,6 @@ ErrorCode Tx::Commit() {
 ErrorCode Tx::commitFreelist() {
   // Allocate new pages for the new free list. This will overestimate
   // the size of the freelist but not underestimate the size (which would be bad).
-  const pgid_t opgid = this->meta->pgid;
   auto [p, err] = this->allocate((this->db->freelist->size() / this->db->pageSize) + 1);
   if (err != ErrorCode::OK) {
     this->rollback();
@@ -204,13 +217,6 @@ ErrorCode Tx::commitFreelist() {
     return err;
   }
   this->meta->freelist = p->id;
-  // If the high water mark has moved up then attempt to grow the database.
-  if (this->meta->pgid > opgid) {
-    if (auto err = this->db->grow(int(this->meta->pgid + 1) * this->db->pageSize); not err.OK()) {
-      this->rollback();
-      return err.err_code_;
-    }
-  }
 
   return ErrorCode::OK;
 }

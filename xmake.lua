@@ -212,6 +212,13 @@ target("test_cmd_bbolt_command")
     add_files("tests/cmd_bbolt_command_test.cpp")
 
 -- Special test targets
+target("test_durability_grow")
+    set_kind("binary")
+    set_languages("c++17")
+    add_deps("bbolt_pp")
+    add_packages("abseil", "fmt", "gtest")
+    add_files("tests/durability_grow_test.cpp")
+
 target("test_special_dmflakey")
     set_kind("binary")
     set_languages("c++17")
