@@ -286,6 +286,10 @@ void Cursor::searchPage(std::string_view key, Page *p) {
   auto it = std::lower_bound(inodes, inodes + out_count, key,
                              [&](const auto &p, const std::string_view &key) { return p.key() < key; });
 
+  if (it != inodes + out_count) {
+    exact = (it->key() == key);
+  }
+
   size_t index = it - inodes;
   if (!exact && index > 0) {
     index--;
