@@ -109,6 +109,8 @@ std::tuple<std::shared_ptr<DB>, Error> DB::Open(std::string_view path, uint32_t 
 
   // Default values for test hooks
   db.ops.writeAt = [db_ptr](std::string_view buff, int64_t offset) { return db_ptr->file->WriteAt(buff, offset); };
+  db.ops.mlockHook = [](const void* addr, size_t len) -> int { return ::mlock(addr, len); };
+  db.ops.madviseHook = [](void* addr, size_t len, int advice) -> int { return ::madvise(addr, len, advice); };
 
   if (db.pageSize = options.PageSize; db.pageSize == 0) {
     // Set the default page size to the OS page size.
@@ -251,9 +253,11 @@ Error DB::mmap(int minsz) {
   }
 
   // Advise the kernel that the mmap is accessed randomly.
-  int const madvise_err = ::madvise(ret, size, MADV_RANDOM);
+  int const madvise_err = this->ops.madviseHook ? this->ops.madviseHook(ret, size, MADV_RANDOM)
+                                                : ::madvise(ret, size, MADV_RANDOM);
   if (madvise_err != 0 && errno != ENOSYS) {
     // Ignore not implemented error in kernel because it still works.
+    ::munmap(ret, size);
     return Error{absl::StrFormat("madvise: %d errno %d ", madvise_err, errno)};
   }
 
@@ -298,6 +302,8 @@ Error DB::munmap() {
   dataref = std::string_view{};
   data = std::string_view{};
   datasz = 0;
+  this->meta0 = nullptr;
+  this->meta1 = nullptr;
   return Error{ret};
 }
 
@@ -360,7 +366,8 @@ Error DB::mlock(int fileSize) {
   if (size_to_lock > data.size()) {
     size_to_lock = data.size();
   }
-  auto ret = ::mlock(data.data(), size_to_lock);
+  auto ret = this->ops.mlockHook ? this->ops.mlockHook(data.data(), size_to_lock)
+                                 : ::mlock(data.data(), size_to_lock);
   return Error{ret};
 }
 

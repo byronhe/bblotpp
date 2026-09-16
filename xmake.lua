@@ -104,6 +104,13 @@ target("test_db_whitebox")
     add_packages("abseil", "fmt", "gtest")
     add_files("tests/db_whitebox_test.cpp")
 
+target("test_db_munmap_meta")
+    set_kind("binary")
+    set_languages("c++17")
+    add_deps("bbolt_pp")
+    add_packages("abseil", "fmt", "gtest")
+    add_files("tests/db_munmap_meta_test.cpp")
+
 target("test_manydbs")
     set_kind("binary")
     set_languages("c++17")

@@ -211,6 +211,8 @@ class DB : public std::enable_shared_from_this<DB> {
   struct Operations {
     std::function<std::tuple<int, Error>(std::string_view b, int64_t offset)> writeAt;
     // writeAt func(b[] byte, off int64)(n int, err error)
+    std::function<int(const void* addr, size_t len)> mlockHook;
+    std::function<int(void* addr, size_t len, int advice)> madviseHook;
   } ops;
 
   // Read only mode.
