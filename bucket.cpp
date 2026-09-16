@@ -22,10 +22,6 @@ std::shared_ptr<Bucket> newBucket(std::shared_ptr<Tx> tx) {
   b->tx = tx;
   b->FillPercent = DefaultFillPercent;
 
-  if (tx->writable) {
-    // b->buckets = make(map[string]*Bucket)
-    // b->nodes = make(map[pgid]*node)
-  }
   return b;
 }
 
@@ -190,7 +186,6 @@ ErrorCode Bucket::DeleteBucket(string_view key) {
     if (auto [_, __, childFlags] = child->NewCursor()->seek(k); (childFlags & bucketLeafFlag) != 0) {
       if (auto err = child->DeleteBucket(k); err != ErrorCode::OK) {
         return err;
-        // return fmt.Errorf("delete bucket: %s", err)
       }
     }
     return ErrorCode::OK;
@@ -730,11 +725,5 @@ void BucketStats::Add(const BucketStats &other) {
   InlineBucketN += other.InlineBucketN;
   InlineBucketInuse += other.InlineBucketInuse;
 }
-
-// // cloneBytes returns a copy of a given slice.
-// func cloneBytes(v []byte) []byte {
-// 	var clone = make([]byte, len(v));
-// 	copy(clone, v);
-// 	return clone;
 
 }  // namespace bboltpp
