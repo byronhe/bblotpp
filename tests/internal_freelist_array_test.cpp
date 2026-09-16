@@ -26,7 +26,7 @@ protected:
 TEST_F(InternalFreelistArrayTest, TestFreelistArray_allocate) {
     auto f = std::make_unique<ArrayFreeList>();
     std::vector<pgid_t> ids = {3, 4, 5, 6, 7, 9, 12, 13, 18};
-    // f->Init(ids); // Init method not available in C++ version
+    f->ReadIDs(ids);
     
     if (int id = f->Allocate(1, 3); id != 3) {
         throw std::runtime_error("exp=3; got=" + std::to_string(id));
@@ -51,9 +51,9 @@ TEST_F(InternalFreelistArrayTest, TestFreelistArray_allocate) {
     }
     
     std::vector<pgid_t> exp = {9, 18};
-    // auto freeIds = f->freePageIds(); // freePageIds method not available in C++ version
-    // std::sort(freeIds.begin(), freeIds.end());
-    // ASSERT_EQ(exp, freeIds);
+    auto freeIds = f->GetFreePageIDs();
+    std::sort(freeIds.begin(), freeIds.end());
+    ASSERT_EQ(exp, freeIds);
 
     if (int id = f->Allocate(1, 1); id != 9) {
         throw std::runtime_error("exp=9; got=" + std::to_string(id));
@@ -66,8 +66,34 @@ TEST_F(InternalFreelistArrayTest, TestFreelistArray_allocate) {
     }
     
     std::vector<pgid_t> emptyExp = {};
-    // auto emptyFreeIds = f->freePageIds(); // freePageIds method not available in C++ version
-    // ASSERT_EQ(emptyExp, emptyFreeIds);
+    auto emptyFreeIds = f->GetFreePageIDs();
+    std::sort(emptyFreeIds.begin(), emptyFreeIds.end());
+    ASSERT_EQ(emptyExp, emptyFreeIds);
+}
+
+TEST_F(InternalFreelistArrayTest, TestFreelistArray_allocate_fast_path_no_leak) {
+    auto f = std::make_unique<ArrayFreeList>();
+    std::vector<pgid_t> ids = {3, 4, 5, 6, 7, 8, 9, 10};
+    f->ReadIDs(ids);
+
+    int initialCount = f->FreeCount();
+    ASSERT_EQ(8, initialCount);
+
+    pgid_t expect = 3;
+    for (int i = 0; i < 5; ++i) {
+        auto id = f->Allocate(1, 1);
+        ASSERT_EQ(expect, id);
+        ASSERT_EQ(initialCount - (i + 1), f->FreeCount())
+            << "freelist shrank by more than 1 on a single-page allocation";
+        ++expect;
+    }
+
+    auto freeIds = f->GetFreePageIDs();
+    std::sort(freeIds.begin(), freeIds.end());
+    std::vector<pgid_t> remaining = {8, 9, 10};
+    ASSERT_EQ(remaining, freeIds);
+
+    ASSERT_EQ(3, f->FreeCount());
 }
 
 TEST_F(InternalFreelistArrayTest, TestInvalidArrayAllocation) {

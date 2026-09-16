@@ -83,7 +83,7 @@ pgid_t ArrayFreeList::Allocate(txid_t txid, int n) {
       // temporarily but the append() in free() will realloc the slice
       // as is necessary.
       if ((i + 1) == n) {
-        ids.erase(ids.begin(), ids.begin() + i + 2);
+        ids.erase(ids.begin(), ids.begin() + i + 1);
         // ids = ids[i+1:]
       } else {
         ids.erase(ids.begin() + i - n + 1, ids.begin() + i + 1);
