@@ -212,7 +212,7 @@ Error DB::mmap(int minsz) {
   auto [info, err] = file->Stat();
   if (not err.OK()) {
     return Error(absl::StrFormat("mmap stat error: %v", err));
-  } else if (int(info.Size()) < this->pageSize * 2) {
+  } else if (info.Size() < size_t(this->pageSize) * 2) {
     return Error{absl::StrFormat("file size too small")};
   }
 
