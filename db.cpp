@@ -551,6 +551,7 @@ std::tuple<std::shared_ptr<Tx>, Error> DB::beginRWTx() {
   auto t = std::make_shared<Tx>();
   t->writable = true;
   t->init(shared_from_this());
+  t->rwlock_guard = std::move(w_g);
   this->rwtx = t;
   this->freePages();
   return {std::move(t), Error{}};

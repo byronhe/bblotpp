@@ -5,6 +5,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string_view>
 #include <tuple>
 #include <vector>
@@ -66,6 +67,7 @@ struct Tx : public std::enable_shared_from_this<Tx> {
   bool writable = false;
   bool managed;
   std::shared_ptr<DB> db;
+  std::unique_lock<std::mutex> rwlock_guard;
   std::unique_ptr<Meta> meta;
   std::shared_ptr<Bucket> root;
   std::map<pgid_t, Page *> pages;

@@ -274,7 +274,7 @@ void Tx::close() {
 
     // Remove transaction ref & writer lock.
     this->db->rwtx.reset();
-    this->db->rwlock.unlock();
+    this->rwlock_guard.unlock();
 
     // Merge statistics.
     this->db->statlock.lock();
