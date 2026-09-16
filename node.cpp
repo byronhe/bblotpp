@@ -303,6 +303,7 @@ std::tuple<std::shared_ptr<struct Node>, std::shared_ptr<struct Node>> Node::spl
     new_parent->bucket = bucket;
     new_parent->children.push_back(shared_from_this());
     parent = new_parent;
+    bucket_ptr->rootNode = new_parent;
   }
 
   // Create a new node and add it to the parent.

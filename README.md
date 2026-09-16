@@ -21,7 +21,7 @@ The core functionality has been implemented and verified. Basic database operati
 | test_bucket_simple | PASS | 7/7 |
 | test_internal_common_page | PASS | 4/4 |
 | test_utils | PASS | 12/12 |
-| test_node | Partial | 5/6 |
+| test_node | PASS | 6/6 |
 | test_db | Partial | - |
 | test_allocate | Partial | 1/3 |
 
