@@ -255,7 +255,7 @@ void Node::write(Page *p) {
 std::vector<std::shared_ptr<Node>> Node::split(int pageSize) {
   std::vector<std::shared_ptr<Node>> nodes;
 
-  auto node = this;
+  auto node = shared_from_this();
   for (;;) {
     // Split node into two.
     auto [a, b] = node->splitTwo(pageSize);
@@ -267,7 +267,7 @@ std::vector<std::shared_ptr<Node>> Node::split(int pageSize) {
     }
 
     // Set node to b so it gets split on the next iteration.
-    node = b.get();
+    node = b;
   }
 
   return nodes;
