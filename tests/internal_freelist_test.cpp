@@ -135,6 +135,30 @@ TEST_F(InternalFreelistTest, TestFreelist_free_freelist) {
     ASSERT_GT(allocated, 0);
 }
 
+// Regression test for the false-positive double-free abort.
+// freed() must be a read-only lookup: querying a page that is not in the cache
+// must NOT insert a spurious {pgid:false} entry. With the buggy
+// `return cache[pgid];` (operator[]), a miss would default-construct and insert
+// `false`, poisoning the shared cache.
+TEST_F(InternalFreelistTest, FreedQueryOnMissingPageDoesNotMutateCache) {
+    auto f = newTestFreelist();
+
+    auto page5 = createTestPage(5);
+    f->free(100, &page5);  // legitimately free page 5: cache == {5: true}
+    ASSERT_EQ(f->cache.count(5), 1u);
+    ASSERT_EQ(f->cache.at(5), true);
+    ASSERT_EQ(f->cache.size(), 1u);
+
+    // Query pages that are NOT free. This must be a read-only operation.
+    EXPECT_FALSE(f->freed(7));
+    EXPECT_FALSE(f->freed(8));
+
+    // The cache must not have been mutated by the misses (no poisoned entries).
+    EXPECT_EQ(f->cache.count(7), 0u);
+    EXPECT_EQ(f->cache.count(8), 0u);
+    EXPECT_EQ(f->cache.size(), 1u);  // still only {5: true}
+}
+
 // Ensure that a transaction's free pages can be released.
 TEST_F(InternalFreelistTest, TestFreelist_release) {
     auto f = newTestFreelist();

@@ -219,7 +219,10 @@ void FreeList::rollback(txid_t txid) {
 }
 
 // freed returns whether a given page is in the free list.
-bool FreeList::freed(pgid_t pgid) { return cache[pgid]; }
+bool FreeList::freed(pgid_t pgid) {
+  auto it = cache.find(pgid);
+  return it != cache.end() && it->second;
+}
 
 // read initializes the freelist from a freelist page.
 void FreeList::read(Page *p) {
