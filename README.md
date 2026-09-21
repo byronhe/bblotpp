@@ -108,7 +108,6 @@ bblotpp/
 ├── utils.cpp/h           # Utility functions
 ├── verify.cpp/h          # Verification utilities
 ├── version.h             # Version string (1.4.0-alpha.0)
-├── boltsync.cpp/h        # Synchronization primitives
 ├── status.h              # Status definitions
 ├── tests/                # 33 test files
 │   ├── test_common.h     # Shared test utilities
