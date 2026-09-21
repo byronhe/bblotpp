@@ -38,7 +38,6 @@ All 30+ test targets compile successfully.
 - [x] B+ tree node operations (split, rebalance, spill)
 - [x] Cursor operations (First, Last, Next, Prev, Seek, Delete)
 - [x] Inline buckets
-- [x] Database compaction
 - [x] Database consistency checks (`Tx::Check`)
 - [x] FNV-1a checksum (binary-compatible with Go bbolt)
 - [x] File locking (`flock`)
@@ -99,7 +98,6 @@ bblotpp/
 ├── page.cpp/h            # Page layout: meta, leaf, branch, freelist pages
 ├── freelist.cpp/h        # Array-based freelist
 ├── freelist_hmap.cpp     # HashMap-based freelist
-├── compact.cpp           # Database compaction
 ├── file.cpp/h            # File I/O: pread, pwrite, flock, fdatasync
 ├── errors.h              # ErrorCode enum and Error class
 ├── unsafe.h              # Unsafe pointer arithmetic helpers
