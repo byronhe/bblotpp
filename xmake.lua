@@ -17,7 +17,7 @@ target("bbolt_pp")
     set_kind("static")
     set_languages("c++17")
     add_packages("abseil","folly")
-    add_files("bucket.cpp","compact.cpp","cursor.cpp","db.cpp","file.cpp","freelist.cpp","freelist_hmap.cpp","node.cpp","page.cpp","tx.cpp","logger.cpp","mlock.cpp","utils.cpp","verify.cpp")
+    add_files("bucket.cpp","cursor.cpp","db.cpp","file.cpp","freelist.cpp","freelist_hmap.cpp","node.cpp","page.cpp","tx.cpp","logger.cpp","mlock.cpp","utils.cpp","verify.cpp")
 
 target("test_basic")
     set_kind("binary")
