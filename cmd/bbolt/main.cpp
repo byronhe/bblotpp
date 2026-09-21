@@ -10,24 +10,12 @@ namespace cmd {
 
 class Command {
 public:
-  Command(const std::string& name, const std::string& description)
-    : name_(name), description_(description) {}
-  
   virtual ~Command() = default;
   virtual int Execute(const std::vector<std::string>& args) = 0;
-  
-  const std::string& name() const { return name_; }
-  const std::string& description() const { return description_; }
-
-protected:
-  std::string name_;
-  std::string description_;
 };
 
 class VersionCommand : public Command {
 public:
-  VersionCommand() : Command("version", "print the current version of bbolt++") {}
-  
   int Execute(const std::vector<std::string>& args) override {
     std::cout << "bbolt++ Version: " << GetVersion() << std::endl;
     std::cout << "C++ Standard: " << __cplusplus << std::endl;
@@ -37,8 +25,6 @@ public:
 
 class HelpCommand : public Command {
 public:
-  HelpCommand() : Command("help", "show help information") {}
-  
   int Execute(const std::vector<std::string>& args) override {
     std::cout << "bbolt++ - A modern C++ implementation of BoltDB" << std::endl;
     std::cout << std::endl;
